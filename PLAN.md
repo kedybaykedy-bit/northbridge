@@ -20,10 +20,14 @@ modeli). Trust store'da fingerprint varsa hangi kanaldan gelirse gelsin "tanıd�
 ```
 northbridge/
 ├── crates/nb-core/        # kimlik, NetworkPacket, trust/peers, Plugin trait, Channel
-├── crates/nb-transport/   # LocalSend HTTPS sarmalayıcı + packet kanalı (mTLS + JSON satır)
+├── crates/nb-transport/   # LocalSend HTTPS sarmalayıcı + packet kanalı (mTLS + JSON satır, stream modu)
 ├── crates/nb-discovery/   # LocalSend discovery + tailscale probe + olay işleme
-├── crates/nb-cli/         # `northbridge` binary
-└── plugins/nb-ping/       # ilk plugin (capability matching kanıtı)
+├── crates/nb-input/       # KVM/touchpad InputMsg enum'u + çerçeveleme + jump zone
+├── crates/nb-cli/         # `northbridge` binary (input.rs touchpad/KVM, x11.rs XTEST enjeksiyonu)
+├── plugins/nb-ping/       # ilk plugin (capability matching kanıtı)
+├── plugins/nb-clipboard/  # pano paylaşımı (M1)
+├── android/               # Android companion uygulaması (M2)
+└── docs/                  # PROTOCOL.md, M3-RESEARCH.md
 ```
 
 - **Portlar:** HTTP = `identity.port` (varsayılan 53317, LocalSend uyumlu),
@@ -41,8 +45,17 @@ northbridge/
 - **M1 (tamam):** dosya paylaşımı (`send` + LocalSend v2 API, sadece paired
   cihazlardan kabul, `~/Downloads/northbridge` → fallback `<config>/downloads`)
   + pano paylaşımı (`nb.clipboard` plugin, 1 sn poll, echo-prevention)
-- **M2:** KVM (Barrier protokolü: 4-byte prefix, CINN/COUT, 1px jump zone) + Android
-- **M3:** ekran (`rustvncserver` + DeskVNC `vnc-core`, Android MediaProjection)
+- **M2 (masaüstü tamam ✓, Android yapım aşamasında):** touchpad + KVM —
+  packet kanalına stream modu (`nb.touchpad.open` → çift yönlü satır akışı),
+  `nb.touchpad`/`nb.kvm` capability'leri, X11/XTEST enjeksiyonu (relatif
+  hareket, tekerlek, evdev+8 tuş, geçici keymap ile her unicode karakter),
+  capture akışı (imleç sabitle + XFixes ile gizle, ~80 Hz telefona aktar,
+  anchor'a geri warp). E2E: `examples/fake_phone.rs` (pair → stream → ping/pong
+  → capture/enter/move/leave → rel_move enjeksiyonu birebir) ✓
+  Protokol: `docs/PROTOCOL.md`
+- **M3 (araştırma tamam ✓):** ekran akışı — öneri: MIT-SHM ile yakalama +
+  MJPEG 10–15 fps (M3-a), `openh264` ile H.264 + Android MediaCodec (M3-b),
+  ayrı mTLS portu; ayrıntı: `docs/M3-RESEARCH.md`
 - **M4:** ses köprüsü (cpal + Opus/UDP)
 - **M5:** Bluetooth RFCOMM transport
 
