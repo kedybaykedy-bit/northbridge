@@ -36,9 +36,11 @@ northbridge/
 
 ## Milestone'lar
 
-- **M0 (bu sürüm):** workspace + kimlik + discovery (LAN/Tailscale/USB sınıflandırma)
+- **M0 (tamam):** workspace + kimlik + discovery (LAN/Tailscale/USB sınıflandırma)
   + trust store + eşleşme + `nb.ping` + CLI (`listen/discover/devices/pair/ping/status`)
-- **M1:** dosya paylaşımı (LocalSend transfer akışı) + pano
+- **M1 (tamam):** dosya paylaşımı (`send` + LocalSend v2 API, sadece paired
+  cihazlardan kabul, `~/Downloads/northbridge` → fallback `<config>/downloads`)
+  + pano paylaşımı (`nb.clipboard` plugin, 1 sn poll, echo-prevention)
 - **M2:** KVM (Barrier protokolü: 4-byte prefix, CINN/COUT, 1px jump zone) + Android
 - **M3:** ekran (`rustvncserver` + DeskVNC `vnc-core`, Android MediaProjection)
 - **M4:** ses köprüsü (cpal + Opus/UDP)

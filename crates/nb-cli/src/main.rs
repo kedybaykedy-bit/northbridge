@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use nb_clipboard::{ClipboardPlugin, SharedState};
 use nb_core::channel::Channel;
 use nb_core::identity::{Identity, config_dir};
 use nb_core::packet::NetworkPacket;
@@ -10,16 +11,18 @@ use nb_core::plugin::{Plugin, PluginCtx, dispatch, plugins_for_capabilities, uni
 use nb_discovery::{discover_staged, probe_tailscale, tailscale_channels};
 use nb_ping::PingPlugin;
 use nb_transport::ls::{
-    UnreachableNotices, decline_upload, ingest_discovery, ingest_register, start_ls,
+    UnreachableNotices, ingest_discovery, ingest_register, start_ls,
 };
-use nb_transport::{PacketHandler, send_packet, start_packet_server};
+use nb_transport::{PacketHandler, send_files, send_packet, start_packet_server};
+use localsend::http::server::common::save::FileUploadTarget;
 use localsend::http::server::v2::{PrepareUploadDecisionV2, ServerEventV2};
 use localsend::discovery::DiscoveryEvent;
 use serde_json::json;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const PAIR_TYPE: &str = "nb.pair";
 const STAGE_INTERVAL: Duration = Duration::from_secs(60);
@@ -93,6 +96,14 @@ enum Cmd {
         /// Device alias or fingerprint prefix.
         target: String,
     },
+    /// Send files to a device over the LocalSend HTTP API.
+    Send {
+        /// Device alias or fingerprint prefix.
+        target: String,
+        /// Files to send.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
     /// Show local identity and store summary.
     Status,
 }
@@ -116,8 +127,11 @@ fn load_peers(cfg: &Option<PathBuf>) -> Result<Peers> {
     Peers::load(&peers_path(cfg))
 }
 
-fn make_plugins() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(PingPlugin)]
+fn make_plugins(clip: SharedState) -> Vec<Box<dyn Plugin>> {
+    vec![
+        Box::new(PingPlugin),
+        Box::new(ClipboardPlugin::new(clip)),
+    ]
 }
 
 #[tokio::main]
@@ -133,6 +147,7 @@ async fn main() -> Result<()> {
         Cmd::Devices => cmd_devices(&cli.config),
         Cmd::Pair { target } => cmd_pair(&cli.config, &target).await,
         Cmd::Ping { target } => cmd_ping(&cli.config, &target).await,
+        Cmd::Send { target, files } => cmd_send(&cli.config, &target, files).await,
         Cmd::Status => cmd_status(&cli.config),
     }
 }
@@ -149,7 +164,8 @@ async fn cmd_listen(
 ) -> Result<()> {
     let identity = load_identity(cfg, alias, port)?;
     let peers = Arc::new(Mutex::new(load_peers(cfg)?));
-    let plugins = Arc::new(Mutex::new(make_plugins()));
+    let clip = nb_clipboard::shared_state();
+    let plugins = Arc::new(Mutex::new(make_plugins(Arc::clone(&clip))));
 
     println!("northbridge listen");
     println!("  alias:       {}", identity.alias);
@@ -172,6 +188,9 @@ async fn cmd_listen(
             eprintln!("[packet] server stopped: {e:#}");
         }
     });
+
+    // Clipboard watcher: push local changes to paired peers (M1).
+    spawn_clipboard_watcher(identity.clone(), Arc::clone(&peers), Arc::clone(&clip));
 
     // Initial staged discovery + Tailscale probe.
     {
@@ -209,9 +228,56 @@ async fn cmd_listen(
                             save_peers(&p)?;
                         }
                     }
-                    ServerEventV2::PrepareUpload { info, decision_tx, .. } => {
-                        println!("[transfer] {} offered files — declined (M0 has no receive UI)", info.alias);
-                        decline_upload(decision_tx);
+                    ServerEventV2::PrepareUpload {
+                        info,
+                        cert_fingerprint,
+                        decision_tx,
+                        files,
+                        ..
+                    } => {
+                        // Only accept transfers from paired devices; the cert
+                        // fingerprint is unspoofable (mTLS), unlike info.fingerprint.
+                        let trusted = cert_fingerprint
+                            .as_deref()
+                            .map(|fp| p.peers.get(fp).map(|d| d.trusted).unwrap_or(false))
+                            .unwrap_or(false);
+                        if trusted {
+                            let ids: HashSet<String> = files.keys().cloned().collect();
+                            println!(
+                                "[transfer] {} sends {} file(s) — accepting",
+                                info.alias,
+                                ids.len()
+                            );
+                            let _ = decision_tx.send(PrepareUploadDecisionV2::Accept(ids));
+                        } else {
+                            println!(
+                                "[transfer] {} (not paired) offers files — declined",
+                                info.alias
+                            );
+                            let _ = decision_tx.send(PrepareUploadDecisionV2::Decline);
+                        }
+                    }
+                    ServerEventV2::FileUpload { file, target_tx, .. } => {
+                        let dir = download_dir();
+                        let path = unique_download_path(&dir, &file.file_name);
+                        let (result_tx, result_rx) = oneshot::channel();
+                        let display = path.clone();
+                        let _ = target_tx.send(FileUploadTarget::Path {
+                            path,
+                            result_tx,
+                            progress_tx: None,
+                        });
+                        tokio::spawn(async move {
+                            match result_rx.await {
+                                Ok(Ok(())) => println!("[transfer] saved {}", display.display()),
+                                Ok(Err(e)) => {
+                                    println!("[transfer] failed {}: {e}", display.display())
+                                }
+                                Err(_) => {
+                                    println!("[transfer] interrupted {}", display.display())
+                                }
+                            }
+                        });
                     }
                     ServerEventV2::ListenerFailed { error } => {
                         eprintln!("[server] {error}");
@@ -528,7 +594,7 @@ async fn cmd_pair(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
     }
     let (fp, peer) = resolve_with_wait(target, &mut peers).await?;
 
-    let plugins = make_plugins();
+    let plugins = make_plugins(nb_clipboard::shared_state());
     let req = NetworkPacket::new(
         PAIR_TYPE,
         json!({
@@ -681,6 +747,176 @@ async fn cmd_ping(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
     )
 }
 
-// Keep the unused-import lint quiet when features shift.
-#[allow(unused_imports)]
-use PrepareUploadDecisionV2 as _Keep;
+// ---------------------------------------------------------------------------
+// send (file transfer, LocalSend HTTP API)
+// ---------------------------------------------------------------------------
+
+async fn cmd_send(cfg: &Option<PathBuf>, target: &str, files: Vec<PathBuf>) -> Result<()> {
+    let identity = load_identity(cfg, None, None)?;
+    let mut peers = load_peers(cfg)?;
+
+    if peers.resolve(target).is_err() {
+        println!("unknown device {target:?} — discovering first…");
+        quick_discover(&identity, &mut peers).await?;
+    }
+    let (fp, peer) = resolve_with_wait(target, &mut peers).await?;
+
+    for f in &files {
+        if !f.is_file() {
+            anyhow::bail!("not a readable file: {}", f.display());
+        }
+    }
+
+    let mut last_err = None;
+    for (channel, addr) in peer.dial_order() {
+        let host = addr.host.clone();
+        println!(
+            "sending {} file(s) to {} via {channel} ({host}:{})…",
+            files.len(),
+            peer.alias,
+            addr.http_port
+        );
+        match send_files(&identity, &host, addr.http_port, &fp, &files).await {
+            Ok(sent) => {
+                for name in &sent {
+                    println!("  sent {name}");
+                }
+                peers.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                save_peers(&peers)?;
+                return Ok(());
+            }
+            Err(e) => last_err = Some(format!("{channel} {host}: {e:#}")),
+        }
+    }
+    anyhow::bail!(
+        "send to {} failed:\n  {}",
+        peer.alias,
+        last_err.unwrap_or_else(|| "no addresses".into())
+    )
+}
+
+// ---------------------------------------------------------------------------
+// clipboard watcher (listen only)
+// ---------------------------------------------------------------------------
+
+/// Poll the local clipboard once a second; when it changes, push the text to
+/// every paired peer over the packet channel. The shared `ClipboardState`
+/// suppresses echoes of content we just received.
+fn spawn_clipboard_watcher(identity: Identity, peers: Arc<Mutex<Peers>>, clip: SharedState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // First tick fires immediately; skip it so startup does not push
+        // whatever was already in the clipboard.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let Some(content) = nb_clipboard::read() else {
+                // No clipboard backend (headless) — retry quietly.
+                continue;
+            };
+            let push = {
+                let mut st = clip.lock().unwrap();
+                if content == st.last || content.is_empty() {
+                    false
+                } else {
+                    st.last = content.clone();
+                    true
+                }
+            };
+            if !push {
+                continue;
+            }
+            // Snapshot paired peers with a clipboard-capable remote.
+            let targets: Vec<(String, nb_core::peer::Peer)> = {
+                let p = peers.lock().unwrap();
+                p.peers
+                    .iter()
+                    .filter(|(_, d)| d.trusted)
+                    .map(|(fp, d)| (fp.clone(), d.clone()))
+                    .collect()
+            };
+            if targets.is_empty() {
+                continue;
+            }
+            let preview: String = content.chars().take(40).collect();
+            println!("[clipboard] local change → pushing to {} peer(s): {preview}", targets.len());
+            for (fp, dev) in targets {
+                // Empty remote caps = legacy peer that loads everything (KC rule).
+                let capable = dev.incoming_capabilities.is_empty()
+                    || dev
+                        .incoming_capabilities
+                        .iter()
+                        .any(|c| c == "nb.clipboard");
+                if !capable {
+                    continue;
+                }
+                for (_channel, addr) in dev.dial_order() {
+                    let pkt = NetworkPacket::new(
+                        "nb.clipboard",
+                        json!({"content": content, "ts": nb_core::packet::now_ms()}),
+                    );
+                    match send_packet(&identity, &addr.host, addr.http_port + 1, &fp, &pkt).await
+                    {
+                        Ok(resp) if resp.body.get("ack").and_then(|v| v.as_bool()) == Some(true) => {
+                            break; // delivered on this peer
+                        }
+                        Ok(_) | Err(_) => continue, // try next channel
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Receive directory: `$NORTHBRIDGE_DOWNLOAD_DIR` or `~/Downloads/northbridge`.
+/// Falls back to `<config>/downloads` when the preferred path cannot be
+/// created (e.g. `~/Downloads` exists as a file).
+fn download_dir() -> PathBuf {
+    let candidates = [
+        std::env::var_os("NORTHBRIDGE_DOWNLOAD_DIR").map(PathBuf::from),
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join("Downloads").join("northbridge")),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if std::fs::create_dir_all(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    let fallback = config_dir().join("downloads");
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
+}
+
+/// `dir/name`, de-duplicated to `name (1).ext`, `name (2).ext`, …
+fn unique_download_path(dir: &Path, file_name: &str) -> PathBuf {
+    // Strip any directory components a hostile sender might embed.
+    let base = Path::new(file_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty() && n != "." && n != "..")
+        .unwrap_or_else(|| "download".to_string());
+    let candidate = dir.join(&base);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(&base)
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| base.clone());
+    let ext = Path::new(&base)
+        .extension()
+        .map(|n| n.to_string_lossy().into_owned());
+    for i in 1..1000 {
+        let name = match &ext {
+            Some(e) => format!("{stem} ({i}).{e}"),
+            None => format!("{stem} ({i})"),
+        };
+        let candidate = dir.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!("{stem}-{}", nb_core::packet::now_ms()))
+}

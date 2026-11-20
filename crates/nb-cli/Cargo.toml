@@ -13,6 +13,7 @@ nb-core = { workspace = true }
 nb-transport = { workspace = true }
 nb-discovery = { workspace = true }
 nb-ping = { workspace = true }
+nb-clipboard = { workspace = true }
 localsend = { workspace = true, features = ["discovery"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }

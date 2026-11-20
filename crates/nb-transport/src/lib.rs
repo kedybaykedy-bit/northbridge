@@ -10,6 +10,8 @@
 pub mod ls;
 pub mod packet_channel;
 pub mod tls;
+pub mod transfer;
 
 pub use ls::{LsHandles, start_ls};
 pub use packet_channel::{PacketHandler, read_packet, start_packet_server, send_packet};
+pub use transfer::send_files;

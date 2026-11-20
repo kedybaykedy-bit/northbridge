@@ -12,3 +12,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+mime_guess = { workspace = true }
