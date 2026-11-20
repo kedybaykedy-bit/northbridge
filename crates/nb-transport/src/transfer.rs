@@ -11,7 +11,7 @@ use localsend::http::dto_v2::{PrepareUploadRequestDtoV2, RegisterDtoV2};
 use localsend::model::discovery::{DeviceType, ProtocolType, PROTOCOL_VERSION_V2};
 use localsend::model::transfer::{FileContent, FileDto, FileMetadata};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 

@@ -5,6 +5,7 @@ members = [
     "crates/nb-transport",
     "crates/nb-discovery",
     "crates/nb-cli",
+    "crates/nb-input",
     "plugins/nb-ping",
     "plugins/nb-clipboard",
 ]
@@ -18,6 +19,7 @@ license = "GPL-3.0-or-later"
 nb-core = { path = "crates/nb-core" }
 nb-transport = { path = "crates/nb-transport" }
 nb-discovery = { path = "crates/nb-discovery" }
+nb-input = { path = "crates/nb-input" }
 nb-ping = { path = "plugins/nb-ping" }
 nb-clipboard = { path = "plugins/nb-clipboard" }
 localsend = { path = "../localsend/packages/core", default-features = false }
@@ -32,3 +34,4 @@ if-addrs = "0.15"
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4"] }
 mime_guess = "2.0"
+x11rb = { version = "0.13", features = ["xtest", "xfixes"] }

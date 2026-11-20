@@ -13,5 +13,7 @@ pub mod tls;
 pub mod transfer;
 
 pub use ls::{LsHandles, start_ls};
-pub use packet_channel::{PacketHandler, read_packet, start_packet_server, send_packet};
+pub use packet_channel::{
+    INPUT_OPEN_KIND, InputRegistry, PacketHandler, read_packet, send_packet, start_packet_server,
+};
 pub use transfer::send_files;

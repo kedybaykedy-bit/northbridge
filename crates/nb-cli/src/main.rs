@@ -1,7 +1,11 @@
 //! `northbridge` CLI — discovery, pairing, plugins over LAN/Tailscale/USB.
 
+mod input;
+mod x11;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use input::{InputState, TouchpadPlugin};
 use nb_clipboard::{ClipboardPlugin, SharedState};
 use nb_core::channel::Channel;
 use nb_core::identity::{Identity, config_dir};
@@ -13,7 +17,7 @@ use nb_ping::PingPlugin;
 use nb_transport::ls::{
     UnreachableNotices, ingest_discovery, ingest_register, start_ls,
 };
-use nb_transport::{PacketHandler, send_files, send_packet, start_packet_server};
+use nb_transport::{InputRegistry, PacketHandler, send_files, send_packet, start_packet_server};
 use localsend::http::server::common::save::FileUploadTarget;
 use localsend::http::server::v2::{PrepareUploadDecisionV2, ServerEventV2};
 use localsend::discovery::DiscoveryEvent;
@@ -127,10 +131,15 @@ fn load_peers(cfg: &Option<PathBuf>) -> Result<Peers> {
     Peers::load(&peers_path(cfg))
 }
 
-fn make_plugins(clip: SharedState) -> Vec<Box<dyn Plugin>> {
+fn make_plugins(
+    clip: SharedState,
+    input: Arc<Mutex<InputState>>,
+    registry: InputRegistry,
+) -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(PingPlugin),
         Box::new(ClipboardPlugin::new(clip)),
+        Box::new(TouchpadPlugin::new(input, registry)),
     ]
 }
 
@@ -165,7 +174,13 @@ async fn cmd_listen(
     let identity = load_identity(cfg, alias, port)?;
     let peers = Arc::new(Mutex::new(load_peers(cfg)?));
     let clip = nb_clipboard::shared_state();
-    let plugins = Arc::new(Mutex::new(make_plugins(Arc::clone(&clip))));
+    let registry = InputRegistry::new();
+    let input = Arc::new(Mutex::new(InputState::with_display()));
+    let plugins = Arc::new(Mutex::new(make_plugins(
+        Arc::clone(&clip),
+        Arc::clone(&input),
+        registry.clone(),
+    )));
 
     println!("northbridge listen");
     println!("  alias:       {}", identity.alias);
@@ -184,7 +199,7 @@ async fn cmd_listen(
     let handler = make_handler(&identity, Arc::clone(&peers), Arc::clone(&plugins), !no_auto_pair);
     let packet_identity = identity.clone();
     tokio::spawn(async move {
-        if let Err(e) = start_packet_server(packet_identity, handler).await {
+        if let Err(e) = start_packet_server(packet_identity, handler, registry).await {
             eprintln!("[packet] server stopped: {e:#}");
         }
     });
@@ -382,7 +397,15 @@ fn make_handler(
                 // A one-shot `pair` command may have just written trust to
                 // peers.json from another process — fold that in before the
                 // trust check, or outbound pairs never take effect here.
-                let _ = p.merge_disk();
+                // Input streams hit this path at ~60 Hz, so only consult the
+                // disk while trust is still missing from memory.
+                let needs_trust = match p.peers.get(peer_fp) {
+                    Some(d) => !d.trusted,
+                    None => true,
+                };
+                if needs_trust {
+                    let _ = p.merge_disk();
+                }
                 let Some((_, peer)) = p.peers.get_key_value(peer_fp) else {
                     return Some(error_packet("not paired — run `northbridge pair` first"));
                 };
@@ -403,10 +426,19 @@ fn make_handler(
                 };
                 let mut plugs = plugins.lock().unwrap();
                 let active = plugins_for_capabilities(&peer_in, &peer_out, &plugs);
-                match dispatch(&mut plugs, &active, &ctx, &pkt) {
-                    Some(resp) => Some(resp),
-                    None => Some(error_packet(&format!("unknown or inactive packet type: {}", pkt.kind))),
+                // dispatch() returning None means either "no plugin owns this
+                // type" (an error) or "handled, no response" (normal for
+                // silent stream input) — distinguish before answering.
+                let matched = active
+                    .iter()
+                    .any(|&i| plugs[i].incoming().contains(&pkt.kind.as_str()));
+                if !matched {
+                    return Some(error_packet(&format!(
+                        "unknown or inactive packet type: {}",
+                        pkt.kind
+                    )));
                 }
+                dispatch(&mut plugs, &active, &ctx, &pkt)
             }
         }
     })
@@ -594,7 +626,11 @@ async fn cmd_pair(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
     }
     let (fp, peer) = resolve_with_wait(target, &mut peers).await?;
 
-    let plugins = make_plugins(nb_clipboard::shared_state());
+    let plugins = make_plugins(
+        nb_clipboard::shared_state(),
+        Arc::new(Mutex::new(InputState::new())),
+        InputRegistry::new(),
+    );
     let req = NetworkPacket::new(
         PAIR_TYPE,
         json!({

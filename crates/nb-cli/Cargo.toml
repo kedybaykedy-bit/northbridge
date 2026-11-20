@@ -14,6 +14,9 @@ nb-transport = { workspace = true }
 nb-discovery = { workspace = true }
 nb-ping = { workspace = true }
 nb-clipboard = { workspace = true }
+nb-input = { workspace = true }
+x11rb = { workspace = true }
+tokio-rustls = { workspace = true }
 localsend = { workspace = true, features = ["discovery"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }
