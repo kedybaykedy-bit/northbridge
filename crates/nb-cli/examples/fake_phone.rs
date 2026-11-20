@@ -167,6 +167,25 @@ async fn main() -> Result<()> {
     })
     .await?;
 
+    println!("[7] touchpad rel_move injection (not capturing)…");
+    let before = mouse();
+    send(
+        &mut w,
+        "nb.touchpad",
+        json!({"t": "rel_move", "dx": 90.0, "dy": 45.0}),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = mouse();
+    println!("  before={before:?} after={after:?} (expect +90,+45)");
+    if before.0 >= 0 && after.0 >= 0 {
+        let ddx = after.0 - before.0;
+        let ddy = after.1 - before.1;
+        if (90 - ddx).abs() > 4 || (45 - ddy).abs() > 4 {
+            bail!("rel_move injection off: got delta ({ddx},{ddy})");
+        }
+    }
+
     println!("FAKE PHONE OK — full KVM handshake verified");
     Ok(())
 }

@@ -357,15 +357,25 @@ fn make_handler(
             PAIR_TYPE => {
                 let mut p = peers.lock().unwrap();
                 let accepted = auto_pair;
+                let alias = pkt
+                    .body
+                    .get("alias")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("peer")
+                    .to_string();
+                if let Some(pin) = pkt.body.get("pin").and_then(|v| v.as_str()) {
+                    println!(
+                        "[pair] {alias} shows PIN {pin} — verify it matches the phone screen"
+                    );
+                }
                 if accepted {
-                    let alias = pkt.body.get("alias").and_then(|v| v.as_str()).unwrap_or("peer");
                     let incoming = str_array(&pkt.body, "incoming");
                     let outgoing = str_array(&pkt.body, "outgoing");
                     // NOTE: do not record an address from this inbound packet
                     // connection — `remote.port()` is the client's ephemeral
                     // source port, not its HTTP port. Correct addresses arrive
                     // via register/discovery events.
-                    p.mark_trusted(peer_fp, alias, channel, incoming.clone(), outgoing.clone());
+                    p.mark_trusted(peer_fp, &alias, channel, incoming.clone(), outgoing.clone());
                     let _ = p.save();
                     println!("[pair] ACCEPTED {} ({fp12}) via {channel}", alias, fp12 = &peer_fp[..12.min(peer_fp.len())]);
                     Some(NetworkPacket::new(
