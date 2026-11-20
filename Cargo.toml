@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nb-core",
+    "crates/nb-transport",
+    "crates/nb-discovery",
+    "crates/nb-cli",
+    "plugins/nb-ping",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+nb-core = { path = "crates/nb-core" }
+nb-transport = { path = "crates/nb-transport" }
+nb-discovery = { path = "crates/nb-discovery" }
+nb-ping = { path = "plugins/nb-ping" }
+localsend = { path = "../localsend/packages/core", default-features = false }
+tokio = { version = "1.53", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "tls12", "std"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
+clap = { version = "4.6", features = ["derive"] }
+if-addrs = "0.15"

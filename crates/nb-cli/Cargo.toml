@@ -1,0 +1,20 @@
+[package]
+name = "nb-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "northbridge"
+path = "src/main.rs"
+
+[dependencies]
+nb-core = { workspace = true }
+nb-transport = { workspace = true }
+nb-discovery = { workspace = true }
+nb-ping = { workspace = true }
+localsend = { workspace = true, features = ["discovery"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "nb-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nb-core = { workspace = true }
+nb-transport = { workspace = true }
+localsend = { workspace = true, features = ["discovery"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

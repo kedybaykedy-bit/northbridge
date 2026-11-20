@@ -1,0 +1,9 @@
+[package]
+name = "nb-ping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nb-core = { workspace = true }
+serde_json = { workspace = true }
