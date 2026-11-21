@@ -66,6 +66,12 @@ class MirrorInjector {
     private fun handleButton(body: JsonObject) {
         val down = (body["down"] as? JsonPrimitive)?.content == "true"
         if (!down) return
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+        if (x != null && y != null) {
+            lastX = x
+            lastY = y
+        }
         when ((body["b"] as? JsonPrimitive)?.content) {
             "left" -> tapAt(lastX, lastY)
             "right" -> longPressAt(lastX, lastY)

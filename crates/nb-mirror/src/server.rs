@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nb_core::identity::Identity;
-use nb_core::packet::NetworkPacket;
+use nb_core::packet::{NetworkPacket, now_ms};
 use nb_transport::{tls, InputRegistry};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -22,7 +22,7 @@ use crate::events::{
 use crate::frame::{self, FrameMeta};
 
 pub const MAX_LINE: usize = 65536;
-pub const FRAME_QUEUE_CAP: usize = 64;
+pub const FRAME_QUEUE_CAP: usize = 512;
 pub const MOTION_THROTTLE: Duration = Duration::from_millis(16);
 
 struct SessionState {
@@ -48,11 +48,18 @@ struct FrameSlot {
 }
 
 impl FrameSlot {
-    fn push(&mut self, frame: RawFrame) {
+    fn push(&mut self, frame: RawFrame) -> u32 {
+        let mut dropped = 0;
         while self.frames.len() >= FRAME_QUEUE_CAP {
             self.frames.pop_front();
+            dropped += 1;
         }
         self.frames.push_back(frame);
+        dropped
+    }
+
+    fn len(&self) -> usize {
+        self.frames.len()
     }
 
     fn drain(&mut self) -> Vec<RawFrame> {
@@ -302,6 +309,8 @@ async fn serve_one(
         inner: inner.clone(),
     };
     let mut last_seq: Option<u32> = None;
+    let mut dumped = 0u32;
+    let mut overflow_total = 0u64;
     loop {
         if !server.matches(generation, &peer_fp) {
             break;
@@ -321,17 +330,45 @@ async fn serve_one(
         if reader.read_exact(&mut payload).await.is_err() {
             break;
         }
+        if dumped < 40 {
+            dumped += 1;
+            let _ = std::fs::create_dir_all("/tmp/nb-frame-dump");
+            let _ = std::fs::write(format!("/tmp/nb-frame-dump/{dumped:06}.264"), &payload);
+        }
         {
             let mut stats = inner.stats.lock().unwrap();
             stats.frames += 1;
             if let Some(last) = last_seq {
                 if meta.seq != last.wrapping_add(1) {
                     stats.gaps += 1;
+                    let g = stats.gaps;
+                    if g <= 20 || g % 100 == 0 {
+                        eprintln!(
+                            "[mirror] seq gap: last={last} now={} (gaps={g})",
+                            meta.seq
+                        );
+                    }
                 }
             }
         }
         last_seq = Some(meta.seq);
-        queue.lock().unwrap().push(RawFrame { meta, payload });
+        let ts_ms = meta.ts_ms;
+        let (dropped, depth) = {
+            let mut q = queue.lock().unwrap();
+            let dropped = q.push(RawFrame { meta, payload });
+            (dropped, q.len())
+        };
+        overflow_total += dropped as u64;
+        let frames_n = inner.stats.lock().unwrap().frames;
+        if frames_n % 60 == 0 || dropped > 0 {
+            eprintln!(
+                "[mirror] lat={}ms depth={} dropped={} overflow_total={}",
+                now_ms().saturating_sub(ts_ms),
+                depth,
+                dropped,
+                overflow_total
+            );
+        }
     }
     server.close_generation(&peer_fp, generation);
     write_half.shutdown().await.ok();
@@ -357,7 +394,7 @@ struct UiForwarder<'a> {
     peer_fp: &'a str,
     can_send: bool,
     pressed: HashSet<u8>,
-    last_motion: Option<Instant>,
+    pointer: Option<(f64, f64)>,
 }
 
 impl<'a> UiForwarder<'a> {
@@ -414,11 +451,18 @@ fn ui_loop(
         peer_fp: &peer_fp,
         can_send: true,
         pressed: HashSet::new(),
-        last_motion: None,
+        pointer: None,
     };
     let mut shown = 0u64;
     let mut waits = 0u64;
     let mut frames_logged = 0u32;
+    let mut error_streak = false;
+    let mut last_show = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut shown_1s = 0u32;
+    let mut t1s = Instant::now();
+    let mut last_lat = 0u64;
+    let mut last_frame_at = Instant::now();
+    let mut ever_framed = false;
     loop {
         if !server.matches(generation, &peer_fp) {
             eprintln!("[mirror] ui thread end (gen {generation} replaced)");
@@ -426,48 +470,117 @@ fn ui_loop(
         }
         let batch = queue.lock().unwrap().drain();
         if batch.is_empty() {
+            if !ever_framed && last_frame_at.elapsed() >= Duration::from_secs(10) {
+                eprintln!("[mirror] no frames in10s — closing empty window");
+                break;
+            }
             std::thread::sleep(Duration::from_millis(4));
         } else {
+            last_frame_at = Instant::now();
+            ever_framed = true;
             let mut latest: Option<(Vec<u8>, u16, u16)> = None;
-            for raw in batch {
+            let n = batch.len();
+            for (idx, raw) in batch.into_iter().enumerate() {
                 if frames_logged < 3 {
                     frames_logged += 1;
                     eprintln!("[mirror] frame seq={} len={}", raw.meta.seq, raw.payload.len());
                 }
+                if error_streak && !contains_idr(&raw.payload) {
+                    waits += 1;
+                    continue;
+                }
                 if let Some(decoder) = decoder.as_mut() {
-                    match decoder.decode(&raw.payload) {
-                        Some(frame) => {
-                            shown += 1;
-                            let (w, h) = (frame.width, frame.height);
-                            if shown <= 3 || shown % 60 == 0 {
-                                eprintln!("[mirror] shown x{shown} {w}x{h}");
+                    let errs_before = decoder.errors;
+                    let dec_before = decoder.decoded;
+                    let want_convert = idx + 1 == n
+                        && last_show.elapsed() >= Duration::from_millis(40);
+                    if want_convert {
+                        last_lat = now_ms().saturating_sub(raw.meta.ts_ms);
+                        match decoder.decode(&raw.payload) {
+                            Some(frame) => {
+                                error_streak = false;
+                                shown += 1;
+                                shown_1s += 1;
+                                let (w, h) = (frame.width, frame.height);
+                                if shown <= 3 || shown % 60 == 0 {
+                                    eprintln!("[mirror] shown x{shown} {w}x{h}");
+                                }
+                                latest = Some((frame.bgra, w, h));
                             }
-                            latest = Some((frame.bgra, w, h));
+                            None => {
+                                waits += 1;
+                                if decoder.errors > errs_before {
+                                    error_streak = true;
+                                }
+                                if waits <= 5 || waits % 60 == 0 {
+                                    eprintln!(
+                                        "[mirror] decode none x{waits} (decoded={} errors={}) streak={error_streak}",
+                                        decoder.decoded, decoder.errors
+                                    );
+                                }
+                            }
                         }
-                        None => {
-                            waits += 1;
-                            if waits <= 5 || waits % 60 == 0 {
-                                eprintln!(
-                                    "[mirror] decode none x{waits} (decoded={} errors={})",
-                                    decoder.decoded, decoder.errors
-                                );
-                            }
+                    } else {
+                        decoder.feed(&raw.payload);
+                        if decoder.decoded > dec_before {
+                            error_streak = false;
+                        } else if decoder.errors > errs_before {
+                            error_streak = true;
                         }
                     }
                 }
             }
             if let Some((bgra, w, h)) = latest {
-                if let Err(e) = window.show_frame(&bgra, w, h) {
-                    eprintln!("[mirror] show frame: {e:#}");
-                } else {
-                    cached = Some((w, h, bgra));
+                if last_show.elapsed() >= Duration::from_millis(25) {
+                    if let Err(e) = window.show_frame(&bgra, w, h) {
+                        eprintln!("[mirror] show frame: {e:#}");
+                    } else {
+                        cached = Some((w, h, bgra));
+                    }
+                    last_show = std::time::Instant::now();
                 }
             }
         }
         drain_events(&mut window, &mut fwd, &mut cached);
+        if t1s.elapsed() >= Duration::from_secs(1) {
+            let depth = queue.lock().unwrap().len();
+            let title = format!(
+                "Northbridge — mirror · {} fps · {} ms · q{}",
+                shown_1s, last_lat, depth
+            );
+            window.set_title(title.as_bytes());
+            if shown_1s > 0 || t1s.elapsed() >= Duration::from_secs(5) {
+                eprintln!("[mirror] fps={shown_1s} lat={last_lat}ms depth={depth}");
+            }
+            shown_1s = 0;
+            t1s = Instant::now();
+        }
     }
     fwd.release_all();
     window.destroy();
+}
+
+fn contains_idr(payload: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 4 < payload.len() {
+        if payload[i] == 0 && payload[i + 1] == 0 {
+            let (start, hdr) = if payload[i + 2] == 1 {
+                (i + 3, i + 3)
+            } else if payload[i + 2] == 0 && payload[i + 3] == 1 {
+                (i + 4, i + 4)
+            } else {
+                i += 1;
+                continue;
+            };
+            if hdr < payload.len() && (payload[hdr] & 0x1F) == 5 {
+                return true;
+            }
+            i = start + 1;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn drain_events(
@@ -489,21 +602,19 @@ fn drain_events(
                 if !fwd.can_send {
                     continue;
                 }
-                let now = Instant::now();
-                let due = fwd
-                    .last_motion
-                    .map(|t| now.duration_since(t) >= MOTION_THROTTLE)
-                    .unwrap_or(true);
-                if !due {
+                let (w, h) = window.size();
+                let nx = normalize_coord(ev.event_x as f64, w as f64);
+                let ny = normalize_coord(ev.event_y as f64, h as f64);
+                fwd.pointer = Some((nx, ny));
+            }
+            Event::EnterNotify(ev) => {
+                if !fwd.can_send {
                     continue;
                 }
-                fwd.last_motion = Some(now);
                 let (w, h) = window.size();
-                fwd.push(json!({
-                    "t": "tap",
-                    "x": normalize_coord(ev.event_x as f64, w as f64),
-                    "y": normalize_coord(ev.event_y as f64, h as f64),
-                }));
+                let nx = normalize_coord(ev.event_x as f64, w as f64);
+                let ny = normalize_coord(ev.event_y as f64, h as f64);
+                fwd.pointer = Some((nx, ny));
             }
             Event::ButtonPress(ev) => {
                 if !fwd.can_send {
@@ -512,8 +623,12 @@ fn drain_events(
                 if let Some((dx, dy)) = scroll_delta(ev.detail) {
                     fwd.push(json!({"t": "scroll", "dx": dx, "dy": dy}));
                 } else if let Some(name) = button_name(ev.detail) {
+                    let (w, h) = window.size();
+                    let nx = normalize_coord(ev.event_x as f64, w as f64);
+                    let ny = normalize_coord(ev.event_y as f64, h as f64);
+                    fwd.pointer = Some((nx, ny));
                     fwd.pressed.insert(ev.detail);
-                    fwd.push(json!({"t": "button", "b": name, "down": true}));
+                    fwd.push(json!({"t": "button", "b": name, "down": true, "x": nx, "y": ny}));
                 }
             }
             Event::ButtonRelease(ev) => {

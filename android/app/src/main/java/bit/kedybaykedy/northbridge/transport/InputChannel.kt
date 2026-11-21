@@ -1,5 +1,6 @@
 package bit.kedybaykedy.northbridge.transport
 
+import android.util.Log
 import bit.kedybaykedy.northbridge.data.TrustedDevice
 import java.io.BufferedReader
 import java.io.IOException
@@ -80,6 +81,14 @@ class InputChannel(
     private var lastActivityAt = 0L
 
     fun attach(target: TrustedDevice?) {
+        if (target != null && target == attached && connectionJob?.isActive == true) {
+            Log.d("northbridge", "packet attach skipped (same target, job alive)")
+            return
+        }
+        Log.d(
+            "northbridge",
+            "packet attach -> ${target?.host ?: "null"}:${target?.packetPort ?: "-"} gen=${generation + 1}",
+        )
         generation++
         attached = target
         closeActiveSocket()
@@ -150,7 +159,8 @@ class InputChannel(
                     }
                 } catch (cancellation: CancellationException) {
                     throw cancellation
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    Log.w("northbridge", "packet session ended: $e")
                 } finally {
                     val closing = socket
                     socket = null
@@ -184,12 +194,14 @@ class InputChannel(
             socket.soTimeout = 0
             socket.startHandshake()
         } catch (e: Exception) {
+            Log.e("northbridge", "packet connect failed ${target.host}:${target.packetPort}: $e")
             try {
                 socket.close()
             } catch (_: Exception) {
             }
             throw e
         }
+        Log.d("northbridge", "packet connected ${target.host}:${target.packetPort}")
         return socket
     }
 
@@ -244,6 +256,7 @@ class InputChannel(
         while (true) {
             delay(KEEPALIVE_INTERVAL_MS)
             if (System.currentTimeMillis() - lastActivityAt > KEEPALIVE_TIMEOUT_MS) {
+                Log.w("northbridge", "packet keepalive timed out (idle>15s)")
                 throw IOException("keepalive timed out")
             }
             writeLine(InputMsg.Ping)
@@ -252,7 +265,10 @@ class InputChannel(
 
     private suspend fun readLoop(reader: BufferedReader) {
         while (true) {
-            val line = reader.readLine() ?: throw IOException("connection closed by peer")
+            val line = reader.readLine() ?: run {
+                Log.w("northbridge", "packet read closed by peer")
+                throw IOException("connection closed by peer")
+            }
             lastActivityAt = System.currentTimeMillis()
             val packet = parsePacket(line) ?: continue
             when (packet.kind) {

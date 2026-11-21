@@ -1,9 +1,12 @@
 package bit.kedybaykedy.northbridge.ui.mirror
 
+import android.content.Intent
+import android.content.res.Resources
 import androidx.lifecycle.ViewModel
 import bit.kedybaykedy.northbridge.AppGraph
 import bit.kedybaykedy.northbridge.data.TrustedDevice
 import bit.kedybaykedy.northbridge.input.MirrorInjector
+import bit.kedybaykedy.northbridge.keepalive.MirrorKeepAliveService
 import bit.kedybaykedy.northbridge.transport.MirrorClient
 import bit.kedybaykedy.northbridge.transport.MirrorLinkState
 import java.io.IOException
@@ -46,9 +49,10 @@ class MirrorViewModel : ViewModel() {
     private var inputsJob: Job? = null
     private var stateJob: Job? = null
     private var statsJob: Job? = null
-    private var sizeJob: Job? = null
 
     init {
+        val dm = Resources.getSystem().displayMetrics
+        injector.setScreenSize(dm.widthPixels, dm.heightPixels)
         stateJob = ioScope.launch {
             client.state.collect { link ->
                 when (link) {
@@ -82,13 +86,6 @@ class MirrorViewModel : ViewModel() {
                 }
             }
         }
-        sizeJob = ioScope.launch {
-            client.videoSize.collect { size ->
-                if (size != null) {
-                    injector.setScreenSize(size.first, size.second)
-                }
-            }
-        }
         inputsJob = ioScope.launch {
             client.inputs.collect { body ->
                 try {
@@ -110,22 +107,38 @@ class MirrorViewModel : ViewModel() {
             }
             _deviceAlias.value = device.alias
             client.startMirror(device.host, device.packetPort, device.fingerprint, FPS, MAX_W)
+            try {
+                AppGraph.appContext.startForegroundService(
+                    Intent(AppGraph.appContext, MirrorKeepAliveService::class.java),
+                )
+            } catch (_: Exception) {
+            }
         }
     }
 
     fun stop() {
         client.stopMirror()
+        stopKeepAlive()
+    }
+
+    private fun stopKeepAlive() {
+        try {
+            AppGraph.appContext.stopService(
+                Intent(AppGraph.appContext, MirrorKeepAliveService::class.java),
+            )
+        } catch (_: Exception) {
+        }
     }
 
     override fun onCleared() {
         inputsJob?.cancel()
         stateJob?.cancel()
         statsJob?.cancel()
-        sizeJob?.cancel()
         try {
             client.stopMirror()
         } catch (_: Exception) {
         }
+        stopKeepAlive()
         ioScope.cancel()
     }
 

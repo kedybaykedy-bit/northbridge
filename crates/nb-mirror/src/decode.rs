@@ -23,6 +23,21 @@ impl H264Decoder {
         })
     }
 
+    pub fn feed(&mut self, annexb: &[u8]) {
+        match self.inner.decode(annexb) {
+            Ok(Some(_)) => {
+                self.decoded += 1;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.errors += 1;
+                if self.errors <= 5 || self.errors % 120 == 0 {
+                    eprintln!("[mirror] feed error: {e}");
+                }
+            }
+        }
+    }
+
     pub fn decode(&mut self, annexb: &[u8]) -> Option<DecodedFrame> {
         let yuv = match self.inner.decode(annexb) {
             Ok(Some(yuv)) => yuv,
@@ -36,9 +51,15 @@ impl H264Decoder {
             }
         };
         let (w, h) = yuv.dimensions();
-        if w == 0 || h == 0 || w > u16::MAX as usize || h > u16::MAX as usize {
+        if w == 0 || h == 0 || w > 4096 || h > 4096 {
             self.errors += 1;
+            if self.errors <= 5 || self.errors % 120 == 0 {
+                eprintln!("[mirror] insane frame dims {w}x{h} — skipped");
+            }
             return None;
+        }
+        if self.decoded < 60 || self.decoded % 120 == 0 {
+            eprintln!("[mirror] decoded ok {w}x{h} (#{} err={})", self.decoded, self.errors);
         }
         let mut rgba = vec![0u8; w * h * 4];
         yuv.write_rgba8(&mut rgba);

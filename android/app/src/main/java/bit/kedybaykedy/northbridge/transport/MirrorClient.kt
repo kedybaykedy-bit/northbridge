@@ -69,7 +69,7 @@ class ScreenrecordSource(
     override val width: Int,
     override val height: Int,
     private val bitrate: Int = 4_000_000,
-    private val timeLimitSec: Int = 165,
+    private val timeLimitSec: Int = 60,
 ) : ScreenSource {
     override suspend fun run(output: SendChannel<ByteArray>) {
         var failures = 0
@@ -397,7 +397,7 @@ class MirrorClient(
                             throw cancellation
                         } catch (e: Exception) {
                             attempt++
-                            if (attempt > 8) throw e
+                            if (attempt > 30) throw e
                             Log.e("northbridge", "mirror reopen attempt $attempt failed", e)
                             delay((500L shl attempt.coerceAtMost(4)).coerceAtMost(8000L))
                             continue

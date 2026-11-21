@@ -20,6 +20,8 @@ pub struct MirrorWindow {
     width: u16,
     height: u16,
     keysym_cache: HashMap<u8, Vec<u32>>,
+    net_wm_name: u32,
+    utf8_string: u32,
 }
 
 impl MirrorWindow {
@@ -30,6 +32,7 @@ impl MirrorWindow {
         let black = setup.roots[screen].black_pixel;
         let window: u32 = conn.generate_id().context("window id")?;
         let mask = EventMask::EXPOSURE
+            | EventMask::ENTER_WINDOW
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
             | EventMask::POINTER_MOTION
@@ -70,26 +73,27 @@ impl MirrorWindow {
         .context("window title")?
         .check()
         .ok();
-        if let Ok(reply) = conn
+        let net_wm_name = conn
             .intern_atom(false, b"_NET_WM_NAME")
-            .context("intern atom")
-            .and_then(|c| c.reply().context("atom reply"))
-        {
-            if let Ok(utf8) = conn
-                .intern_atom(false, b"UTF8_STRING")
-                .context("intern utf8")
-                .and_then(|c| c.reply().context("utf8 reply"))
-            {
-                conn.change_property8(
-                    PropMode::REPLACE,
-                    window,
-                    reply.atom,
-                    utf8.atom,
-                    TITLE,
-                )
-                .context("net title")
-                .and_then(|c| c.check().context("net title check"))
-                .ok();
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.atom)
+            .unwrap_or(0);
+        let utf8_string = conn
+            .intern_atom(false, b"UTF8_STRING")
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.atom)
+            .unwrap_or(0);
+        if net_wm_name != 0 && utf8_string != 0 {
+            if let Ok(cookie) = conn.change_property8(
+                PropMode::REPLACE,
+                window,
+                net_wm_name,
+                utf8_string,
+                TITLE,
+            ) {
+                let _ = cookie.check();
             }
         }
         conn.map_window(window)
@@ -105,7 +109,25 @@ impl MirrorWindow {
             width: 320,
             height: 240,
             keysym_cache: HashMap::new(),
+            net_wm_name,
+            utf8_string,
         })
+    }
+
+    pub fn set_title(&mut self, text: &[u8]) {
+        if self.net_wm_name == 0 || self.utf8_string == 0 {
+            return;
+        }
+        if let Ok(cookie) = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.window,
+            self.net_wm_name,
+            self.utf8_string,
+            text,
+        ) {
+            let _ = cookie.check();
+        }
+        let _ = self.conn.flush();
     }
 
     pub fn size(&self) -> (u16, u16) {
