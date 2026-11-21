@@ -67,7 +67,7 @@ northbridge/
   ile enjekte (evdev→Android tablosu, kalıcı su süreci). Masaüstü: `nb-mirror`
   crate — openh264 decode → X11 penceresi → pencere olayları `nb.mirror`
   olarak geri. Port 53321, scrcpy yaklaşımı (kod kopyası yok, `../scrcpy`
-  referans). E2E handshake+kare ✓; gerçek cihaz testi bekliyor.
+  referans). E2E ✓ + gerçek cihaz testi ✓ (root screenrecord, canlı akış).
 - **M4 (kod tamam ✓):** `docs/M4-RESEARCH.md` uygulandı — `nb-audio` crate:
   NBA1 (24B LE) çift yönlü, port 53320, PCM garantili yol; pipewire/opus/cpal
   yolları default açık (paketler kuruldu); canlı sistem-sesi doğrulandı —
