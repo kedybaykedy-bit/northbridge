@@ -46,6 +46,13 @@ object PointerDaemon {
             binderSock = LocalSocket()
             binderSock.bind(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
             server = LocalServerSocket(binderSock.fileDescriptor)
+            try {
+                val sockFile = File(path)
+                sockFile.setReadable(true, false)
+                sockFile.setWritable(true, false)
+                sockFile.setExecutable(true, false)
+            } catch (_: Exception) {
+            }
             val client = server.accept()
             try {
                 val input = client.inputStream.bufferedReader()
@@ -88,6 +95,8 @@ object PointerDaemon {
             return
         }
         when (parts[0]) {
+            "p" -> {
+            }
             "m" -> {
                 if (parts.size >= 3) {
                     val dx = parts[1].toIntOrNull()

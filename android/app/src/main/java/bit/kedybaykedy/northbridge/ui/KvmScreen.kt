@@ -48,6 +48,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.viewmodel.compose.viewModel
 import bit.kedybaykedy.northbridge.AppGraph
 import bit.kedybaykedy.northbridge.input.NativePointer
@@ -77,6 +79,14 @@ fun KvmScreen(viewModel: KvmViewModel = viewModel()) {
 
     LaunchedEffect(Unit) {
         viewModel.requestCapture()
+    }
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    LaunchedEffect(configuration.orientation) {
+        viewModel.setScreenSize(
+            (configuration.screenWidthDp * density.density).toInt(),
+            (configuration.screenHeightDp * density.density).toInt(),
+        )
     }
     DisposableEffect(Unit) {
         onDispose {

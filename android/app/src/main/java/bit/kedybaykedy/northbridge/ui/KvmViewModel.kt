@@ -1,6 +1,7 @@
 package bit.kedybaykedy.northbridge.ui
 
 import android.content.res.Resources
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import bit.kedybaykedy.northbridge.AppGraph
@@ -77,7 +78,12 @@ class KvmViewModel : ViewModel() {
         }
     }
 
+    fun setScreenSize(width: Int, height: Int) {
+        injector.setScreenSize(width, height)
+    }
+
     fun requestCapture() {
+        Log.d("northbridge", "kvm capture req held=" + captureHeld + " phase=" + _phase.value)
         if (captureHeld) return
         captureHeld = true
         userReleased = false
@@ -86,7 +92,8 @@ class KvmViewModel : ViewModel() {
         }
         viewModelScope.launch(Dispatchers.IO) {
             NativePointer.sessionStart()
-            AppGraph.inputChannel.sendPacket(KIND_MIRROR, grabBody())
+            val ok = AppGraph.inputChannel.sendPacket(KIND_MIRROR, grabBody())
+            Log.d("northbridge", "kvm grab sent=" + ok)
         }
     }
 

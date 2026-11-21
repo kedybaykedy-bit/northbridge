@@ -89,9 +89,11 @@ object NativePointer {
     const val BTN_LEFT = 272
     const val BTN_RIGHT = 273
     const val BTN_MIDDLE = 274
-    const val SOCK_PATH = "/data/local/tmp/nbpointer.sock"
     const val TMP_LIB = "/data/local/tmp/nbpointer_app.so"
     const val PRIV_LIB = "nbpointer.so"
+    private const val POINTER_SENSITIVITY = 1.0
+    private const val FLICK_LINEAR_PX = 64
+    private const val FLICK_EXCESS_GAIN = 0.3
     private const val SHIZUKU_REQ = 4411
     private const val DAEMON_WAIT_MS = 8000L
 
@@ -137,6 +139,14 @@ object NativePointer {
         }
     }
 
+    fun sockPath(): String {
+        return try {
+            AppGraph.appContext.filesDir.resolve("nbpointer.sock").absolutePath
+        } catch (_: Exception) {
+            "/data/local/tmp/nbpointer.sock"
+        }
+    }
+
     fun hasBackend(): Boolean {
         synchronized(lock) {
             return backend != null
@@ -161,34 +171,62 @@ object NativePointer {
     }
 
     fun sessionStart() {
-        synchronized(lock) {
+        val hadBackend = synchronized(lock) {
             sessionOn = true
-            if (backend != null) {
+            backend != null
+        }
+        Log.d("northbridge", "pointer session enter mode=" + mode.value + " backend=" + hadBackend)
+        if (hadBackend) {
+            if (pingBackend()) {
+                Log.d("northbridge", "pointer session keep backend alive")
                 return
             }
+            Log.d("northbridge", "pointer session backend stale")
         }
-        if (mode.value == PointerMode.VIRTUAL) {
-            setStatus("IMLEC: SANAL")
+        if (!claimStart()) {
+            Log.d("northbridge", "pointer session busy")
             return
         }
-        if (startRoot()) {
-            return
-        }
-        if (mode.value == PointerMode.REAL) {
-            maybeAskShizuku()
-            if (startShizuku()) {
+        try {
+            val raced = synchronized(lock) { backend != null }
+            if (raced) {
+                Log.d("northbridge", "pointer session joined backend")
                 return
             }
-            setStatus(shizukuStatus())
-            return
-        }
-        if (startShizuku()) {
-            return
-        }
-        if (!shizukuAlive()) {
-            setStatus("IMLEC: SANAL (KOK YOK)")
-        } else {
-            setStatus(shizukuStatus())
+            if (mode.value == PointerMode.VIRTUAL) {
+                Log.d("northbridge", "pointer session virtual mode")
+                setStatus("IMLEC: SANAL")
+                return
+            }
+            val rootOk = startRoot()
+            Log.d("northbridge", "pointer session root=" + rootOk)
+            if (rootOk) {
+                return
+            }
+            if (mode.value == PointerMode.REAL) {
+                maybeAskShizuku()
+                val shizukuOk = startShizuku()
+                Log.d("northbridge", "pointer session shizuku=" + shizukuOk)
+                if (shizukuOk) {
+                    return
+                }
+                setStatus(shizukuStatus())
+                return
+            }
+            val shizukuOk = startShizuku()
+            Log.d("northbridge", "pointer session shizuku=" + shizukuOk)
+            if (shizukuOk) {
+                return
+            }
+            if (!shizukuAlive()) {
+                Log.d("northbridge", "pointer session no root no shizuku")
+                setStatus("IMLEC: SANAL (KOK YOK)")
+            } else {
+                Log.d("northbridge", "pointer session shizuku denied")
+                setStatus(shizukuStatus())
+            }
+        } finally {
+            synchronized(lock) { starting = false }
         }
     }
 
@@ -212,12 +250,16 @@ object NativePointer {
     }
 
     fun moveAbs(nx: Double, ny: Double, w: Int, h: Int) {
+        moveCalls++
         val link = synchronized(lock) { backend }
         if (link == null) {
             dropLog("move dropped (no backend)")
             return
         }
         if (w <= 0 || h <= 0) {
+            if (moveCalls <= 5) {
+                Log.w("northbridge", "pointer movebad w=" + w + " h=" + h)
+            }
             return
         }
         val cx = nx.coerceIn(0.0, 1.0)
@@ -226,29 +268,72 @@ object NativePointer {
         var dy = 0
         synchronized(lock) {
             if (backend == null) {
+                if (moveCalls <= 10) {
+                    Log.w("northbridge", "pointer move lost backend mid-call")
+                }
                 return
             }
             if (!posInit) {
                 posX = cx
                 posY = cy
                 posInit = true
+                if (moveCalls <= 10) {
+                    Log.d("northbridge", "pointer anchor " + cx + "," + cy)
+                }
                 return
             }
-            accX += (cx - posX) * w
-            accY += (cy - posY) * h
+            val s = minOf(w, h) * POINTER_SENSITIVITY
+            val rdx = cx - posX
+            val rdy = cy - posY
+            accX += rdx * s
+            accY += rdy * s
             posX = cx
             posY = cy
             dx = accX.toInt()
             dy = accY.toInt()
             accX -= dx
             accY -= dy
+            val rawPeak = maxOf(kotlin.math.abs(dx), kotlin.math.abs(dy))
+            dx = compressDelta(dx)
+            dy = compressDelta(dy)
+            val bound = maxOf(w, h)
+            dx = dx.coerceIn(-bound, bound)
+            dy = dy.coerceIn(-bound, bound)
+            val peak = maxOf(kotlin.math.abs(dx), kotlin.math.abs(dy))
+            if (rawPeak > 120 && flickLogCount < 60) {
+                flickLogCount++
+                val ratio = if (rawPeak > 0) peak.toDouble() / rawPeak.toDouble() else 1.0
+                flickLine = "pointer flick r=" + rdx + "," + rdy + " s=" + s + " d=" + dx + "," + dy + " v=" + rawPeak + " g=" + ratio + " " + w + "x" + h
+            }
+        }
+        if (moveCalls <= 3) {
+            Log.d("northbridge", "pointer in " + nx + "," + ny + " " + w + "x" + h + " dx=" + dx + " dy=" + dy)
+        }
+        val flick = synchronized(lock) {
+            val line = flickLine
+            flickLine = null
+            line
+        }
+        if (flick != null) {
+            Log.d("northbridge", flick)
         }
         if (dx != 0 || dy != 0) {
+            moveLogCount++
+            if (moveLogCount <= 10 || moveLogCount % 100 == 0) {
+                Log.w("northbridge", "pointer move $dx,$dy #$moveLogCount")
+            }
             if (!link.write("m " + dx + " " + dy)) {
                 drop(link)
             }
+        } else if (moveCalls <= 5 || moveCalls % 200 == 0) {
+            Log.d("northbridge", "pointer zero acc=" + accX + "," + accY + " #" + moveCalls)
         }
     }
+
+    private var moveCalls = 0
+    private var moveLogCount = 0
+    private var flickLogCount = 0
+    private var flickLine: String? = null
 
     fun button(code: Int, down: Boolean) {
         val link = synchronized(lock) { backend } ?: return
@@ -305,7 +390,9 @@ object NativePointer {
     }
 
     private fun startRoot(): Boolean {
-        if (!rootAvailable()) {
+        val rooted = rootAvailable()
+        Log.d("northbridge", "pointer root avail=" + rooted)
+        if (!rooted) {
             return false
         }
         killStaleDaemons()
@@ -314,17 +401,33 @@ object NativePointer {
             AppGraph.appContext
         } catch (_: Exception) {
             null
-        } ?: return false
+        }
+        if (context == null) {
+            Log.w("northbridge", "pointer root no context")
+            return false
+        }
         val apk = context.applicationInfo.sourceDir
-        val lib = PointerJni.extractLib(apk, context.filesDir, PRIV_LIB) ?: return false
+        val lib = PointerJni.extractLib(apk, context.filesDir, PRIV_LIB)
+        Log.d("northbridge", "pointer root lib=" + (lib != null))
+        if (lib == null) {
+            return false
+        }
         val entry = PointerDaemon::class.java.name
-        val shell = "CLASSPATH=" + apk + " app_process /system/bin " + entry + " " + SOCK_PATH + " " + lib
+        val shell = "CLASSPATH=" + apk + " app_process /system/bin " + entry + " " + sockPath() + " " + lib
         val proc = try {
             ProcessBuilder("su", "-c", shell).start()
         } catch (_: Exception) {
             null
-        } ?: return false
-        val link = waitSocket(proc) ?: return false
+        }
+        Log.d("northbridge", "pointer root proc=" + (proc != null))
+        if (proc == null) {
+            return false
+        }
+        val link = waitSocket(proc)
+        Log.d("northbridge", "pointer root link=" + (link != null))
+        if (link == null) {
+            return false
+        }
         attach(link, "IMLEC: GERCEK (KOK)")
         return true
     }
@@ -412,11 +515,10 @@ object NativePointer {
         } catch (_: Exception) {
         }
         link.write("m -4096 -4096")
-        link.write("m -4096 -4096")
+        val homeOk = link.write("m -4096 -4096")
+        Log.d("northbridge", "pointer attach " + label + " home=" + homeOk)
         synchronized(lock) {
-            posX = 0.0
-            posY = 0.0
-            posInit = true
+            posInit = false
             accX = 0.0
             accY = 0.0
         }
@@ -439,18 +541,21 @@ object NativePointer {
         } catch (_: Exception) {
         }
         if (dead != null) {
+            Log.w("northbridge", "pointer drop backend cleared")
             unbindShizuku()
             setStatus("IMLEC: SANAL (BAGLANTI KOPTU)")
         }
     }
 
     private fun waitSocket(proc: Process?): DaemonLink? {
-        val deadline = SystemClock.uptimeMillis() + DAEMON_WAIT_MS
+        val start = SystemClock.uptimeMillis()
+        val deadline = start + DAEMON_WAIT_MS
         while (SystemClock.uptimeMillis() < deadline) {
             if (proc != null) {
                 try {
                     proc.exitValue()
                     closeQuiet(proc)
+                    Log.w("northbridge", "pointer wait proc died")
                     return null
                 } catch (_: IllegalThreadStateException) {
                 }
@@ -458,8 +563,9 @@ object NativePointer {
             try {
                 val socket = LocalSocket()
                 socket.connect(
-                    LocalSocketAddress(SOCK_PATH, LocalSocketAddress.Namespace.FILESYSTEM),
+                    LocalSocketAddress(sockPath(), LocalSocketAddress.Namespace.FILESYSTEM),
                 )
+                Log.d("northbridge", "pointer wait ok ms=" + (SystemClock.uptimeMillis() - start))
                 return DaemonLink(proc, socket, socket.outputStream.bufferedWriter())
             } catch (_: Exception) {
             }
@@ -471,6 +577,8 @@ object NativePointer {
         if (proc != null) {
             closeQuiet(proc)
         }
+        killStaleDaemons()
+        Log.w("northbridge", "pointer wait timeout")
         return null
     }
 
@@ -534,16 +642,60 @@ object NativePointer {
         }
     }
 
+    private fun compressDelta(v: Int): Int {
+        val a = kotlin.math.abs(v)
+        if (a <= FLICK_LINEAR_PX) {
+            return v
+        }
+        val tamed = FLICK_LINEAR_PX + ((a - FLICK_LINEAR_PX) * FLICK_EXCESS_GAIN).toInt()
+        return if (v > 0) tamed else -tamed
+    }
+
+    private fun pingBackend(): Boolean {
+        val link = synchronized(lock) { backend } ?: return false
+        if (!link.ping()) {
+            drop(link)
+            return false
+        }
+        return true
+    }
+
+    private var starting = false
+
+    private fun claimStart(): Boolean {
+        val deadline = SystemClock.uptimeMillis() + DAEMON_WAIT_MS
+        while (true) {
+            synchronized(lock) {
+                if (!starting) {
+                    starting = true
+                    return true
+                }
+            }
+            if (SystemClock.uptimeMillis() >= deadline) {
+                return false
+            }
+            try {
+                Thread.sleep(200)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun killStaleDaemons() {
         try {
-            ProcessBuilder("su", "-c", "pkill -f PointerDaemon").start().waitFor()
+            ProcessBuilder("su", "-c", "pkill -f [P]ointerDaemon").start().waitFor()
         } catch (_: Exception) {
         }
     }
 
     private fun dropStaleSock() {
+        val path = sockPath()
         try {
-            File(SOCK_PATH).delete()
+            File(path).delete()
+        } catch (_: Exception) {
+        }
+        try {
+            ProcessBuilder("su", "-c", "rm -f " + path).start().waitFor()
         } catch (_: Exception) {
         }
     }
@@ -562,6 +714,10 @@ object NativePointer {
         val socket: LocalSocket,
         val out: java.io.BufferedWriter,
     ) {
+        fun ping(): Boolean {
+            return write("p")
+        }
+
         fun write(line: String): Boolean {
             return try {
                 out.write(line)

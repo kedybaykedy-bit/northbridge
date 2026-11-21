@@ -123,3 +123,28 @@ KDE Connect baz değil; ../scrcpy salt referans (GPL-2, kod kopyası YOK). Kod y
   root `app_process` ile + `screenrecord --display-id` sanal ekranı yakalar mı + `input -d <id>`)
   → kilit deseni (aynı helper) → fps (SHM) → R-E → **en sonda test turu (11 madde)**.
 - Telefon bazen sökülüyor (kullanıcı takıp söküyor) — adb b1a403c6.
+
+## 10. OTURUN SONU DURUM (22.11 gece — bilgisayar kapatılıyor)
+- **Yedek (tmp silinir!)**: `/home/baykedy/temp/nb-backup-20261122/` (11MB) →
+  `nb-dev.log` (PC daemon), `kvm.log`+`nb-full.log` (agent teşhisleri), `nb-tel*.log`,
+  `nb-ev2.log` (getevent6.6MB), tüm ekran görüntüleri (UI doğrulama),
+  `legacy_keysyms.txt`+`legacy_table.rs` (Türkçe keysym tablosu kaynağı).
+- **Ağaç**: commit `a34a749` + **COMMIT EDİLMEMİŞ** işler: Türkçe keysym tablosu
+  (`crates/nb-mirror/src/events.rs`, testli40+2 yeşil), IME servisi (`input/NbIme.kt` yeni,
+  manifest+`res/xml/nb_method.xml` lead'te), duvar-fix + hız/sıkıştırma (`NativePointer.kt`),
+  IME aktive/paket (`MirrorInjector.kt`, `PointerDaemon.kt`, `KvmViewModel.kt`, `KvmScreen.kt`).
+  **Yarın önce `cargo test --workspace` + `assembleDebug` → commit.**
+- **KVM imleç: ÇÖZÜLDÜ ve kullanıcıca doğrulandı** (`GÖRÜNÜYOR OLDU`). Kök nedenler sırayla:
+  (1) SELinux `sock_file` etiketi → soket `filesDir`'e taşındı, (2) yön ölçeklemesi (stored/live
+  eşleşiyor), (3) savurma duvarı → tek monoton sıkıştırıcı `64+(in-64)*0.3` (VEL_* silindi),
+  (4) Türkçe `ğ İ ı Ş` → PC tarafı keysym0x100-0x2FF aralığı bilinmiyordu →79 satırlık tablo.
+- **Bekleyen**: APK kurulumu `waiting for device` (telefon takılınca tamamlanır) →
+  **TEK KAPSAMLI TEST**: dikey BAĞLA → normal gezdir → yavaş üst-aşağı (duvar?) → hızlı savur
+  (uzaklaşmalı/fırlamamalı) → PC'den `öçğüşıİ ÖÇĞÜŞ` (görünüyor mu? **toast?**) → yatay → tekrarla
+  → KOPAR → "bitti".
+- **Subagent yaşam döngüsü**: her rapor sonu idle olur → **lead aynı sessionID'ye mesaj atınca
+  devam eder** (`ses_e004d0fb0ffeH3YCOn5OU6bzdL`). Bilgisayar kapanınca süreç ölür → **yarın
+  YENİ subagent açılacak** (aynı görev tanımı + bu dosyadaki kanıtlarla).
+- **Kurallar hatırlatma**: `pkill` deseni komutun kendisini öldürür (`pkill -f "[a]db logcat"` /
+  `[n]orthbridge listen` — HER ZAMAN ayrı çağrı); daemon'ı kullanıcı testi sırasında YENİDEN
+  BAŞLATMA; telefonda UI'a dokunma; kod yorumu YOK; aynı dosyayı iki agent paylaşmaz.

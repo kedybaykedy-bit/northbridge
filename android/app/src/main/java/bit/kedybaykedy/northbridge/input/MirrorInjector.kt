@@ -1,6 +1,8 @@
 package bit.kedybaykedy.northbridge.input
 
+import android.util.Log
 import android.view.KeyEvent
+import bit.kedybaykedy.northbridge.AppGraph
 import java.io.IOException
 import java.io.OutputStream
 import kotlinx.serialization.json.JsonObject
@@ -41,9 +43,15 @@ class MirrorInjector {
     private var dragLastX = 0
     private var dragLastY = 0
     private var dragDownAt = 0L
+    private var moveBranchCount = 0
+    private var hoverBranchCount = 0
+    private var enterBranchCount = 0
+    private var sizeLogCount = 0
 
     private var typePending = StringBuilder()
     private var typeFuture: java.util.concurrent.ScheduledFuture<*>? = null
+    private var clipPending = StringBuilder()
+    private var clipFuture: java.util.concurrent.ScheduledFuture<*>? = null
     private val typeExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task).apply { isDaemon = true }
     }
@@ -52,6 +60,16 @@ class MirrorInjector {
         if (width > 0 && height > 0) {
             screenW = width
             screenH = height
+        }
+    }
+
+    private fun dispInfo(): Triple<Int, Int, Int> {
+        return try {
+            val res = AppGraph.appContext.resources
+            val dm = res.displayMetrics
+            Triple(dm.widthPixels, dm.heightPixels, res.configuration.orientation)
+        } catch (_: Exception) {
+            Triple(screenW, screenH, 0)
         }
     }
 
@@ -88,14 +106,34 @@ class MirrorInjector {
 
     fun reset() {
         flushType()
+        typeExecutor.execute {
+            try {
+                flushClip()
+            } catch (_: Exception) {
+            }
+        }
+        typeExecutor.execute {
+            try {
+                NbIme.restorePrevious()
+            } catch (_: Exception) {
+            }
+        }
         disarmDrag()
         NativePointer.releaseAll()
     }
 
     private fun handleEnter(body: JsonObject) {
-        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull ?: return
-        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull ?: return
-        if (!pointerUp()) {
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+        val up = pointerUp()
+        enterBranchCount++
+        if (enterBranchCount <= 5) {
+            Log.d("northbridge", "kvm enter up=" + up + " x=" + x + " y=" + y + " #" + enterBranchCount)
+        }
+        if (x == null || y == null) {
+            return
+        }
+        if (!up) {
             lastX = x.coerceIn(0.0, 1.0)
             lastY = y.coerceIn(0.0, 1.0)
             return
@@ -118,7 +156,12 @@ class MirrorInjector {
         val cy = ny.coerceIn(0.0, 1.0)
         lastX = cx
         lastY = cy
-        NativePointer.moveAbs(cx, cy, screenW, screenH)
+        val info = dispInfo()
+        sizeLogCount++
+        if (sizeLogCount <= 5 || sizeLogCount % 200 == 0) {
+            Log.d("northbridge", "kvm size stored=" + screenW + "x" + screenH + " live=" + info.first + "x" + info.second + " ori=" + info.third + " #" + sizeLogCount)
+        }
+        NativePointer.moveAbs(cx, cy, info.first, info.second)
     }
 
     private fun handleTap(body: JsonObject) {
@@ -205,9 +248,17 @@ class MirrorInjector {
     }
 
     private fun handleHover(body: JsonObject) {
-        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull ?: return
-        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull ?: return
-        if (!pointerUp()) {
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+        val up = pointerUp()
+        hoverBranchCount++
+        if (hoverBranchCount <= 5 || hoverBranchCount % 100 == 0) {
+            Log.d("northbridge", "kvm hover up=" + up + " x=" + x + " y=" + y + " #" + hoverBranchCount)
+        }
+        if (x == null || y == null) {
+            return
+        }
+        if (!up) {
             lastX = x.coerceIn(0.0, 1.0)
             lastY = y.coerceIn(0.0, 1.0)
             return
@@ -216,17 +267,28 @@ class MirrorInjector {
     }
 
     private fun handleMove(body: JsonObject) {
-        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull ?: return
-        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull ?: return
-        if (pointerUp()) {
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+        val up = pointerUp()
+        moveBranchCount++
+        if (moveBranchCount <= 8 || moveBranchCount % 100 == 0) {
+            Log.d("northbridge", "kvm move up=" + up + " armed=" + dragArmed + " x=" + x + " y=" + y + " #" + moveBranchCount)
+        }
+        if (x == null || y == null) {
+            return
+        }
+        if (up) {
             pointerMoveTo(x, y)
             return
         }
         if (!dragArmed) return
+        val info = dispInfo()
+        val w = info.first
+        val h = info.second
         lastX = x.coerceIn(0.0, 1.0)
         lastY = y.coerceIn(0.0, 1.0)
-        dragLastX = (lastX * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
-        dragLastY = (lastY * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
+        dragLastX = (lastX * (w - 1)).toInt().coerceIn(0, w - 1)
+        dragLastY = (lastY * (h - 1)).toInt().coerceIn(0, h - 1)
         val dx = dragLastX - dragStartX
         val dy = dragLastY - dragStartY
         if (dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
@@ -235,12 +297,15 @@ class MirrorInjector {
     }
 
     private fun armDrag(nx: Double, ny: Double) {
+        val info = dispInfo()
+        val w = info.first
+        val h = info.second
         val cx = nx.coerceIn(0.0, 1.0)
         val cy = ny.coerceIn(0.0, 1.0)
         dragArmed = true
         dragMoved = false
-        dragStartX = (cx * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
-        dragStartY = (cy * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
+        dragStartX = (cx * (w - 1)).toInt().coerceIn(0, w - 1)
+        dragStartY = (cy * (h - 1)).toInt().coerceIn(0, h - 1)
         dragLastX = dragStartX
         dragLastY = dragStartY
         dragDownAt = System.currentTimeMillis()
@@ -254,10 +319,13 @@ class MirrorInjector {
     private fun finishDrag(nx: Double?, ny: Double?) {
         if (!dragArmed) return
         dragArmed = false
-        val fx = ((nx ?: lastX).coerceIn(0.0, 1.0) * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
-        val fy = ((ny ?: lastY).coerceIn(0.0, 1.0) * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
-        lastX = (fx.toDouble() / (screenW - 1).coerceAtLeast(1).toDouble()).coerceIn(0.0, 1.0)
-        lastY = (fy.toDouble() / (screenH - 1).coerceAtLeast(1).toDouble()).coerceIn(0.0, 1.0)
+        val info = dispInfo()
+        val w = info.first
+        val h = info.second
+        val fx = ((nx ?: lastX).coerceIn(0.0, 1.0) * (w - 1)).toInt().coerceIn(0, w - 1)
+        val fy = ((ny ?: lastY).coerceIn(0.0, 1.0) * (h - 1)).toInt().coerceIn(0, h - 1)
+        lastX = (fx.toDouble() / (w - 1).coerceAtLeast(1).toDouble()).coerceIn(0.0, 1.0)
+        lastY = (fy.toDouble() / (h - 1).coerceAtLeast(1).toDouble()).coerceIn(0.0, 1.0)
         if (!dragMoved) {
             dragMoved = false
             runCommand("input tap " + fx + " " + fy)
@@ -281,10 +349,8 @@ class MirrorInjector {
     private fun handleType(body: JsonObject) {
         val text = (body["s"] as? JsonPrimitive)?.content ?: return
         if (text.isEmpty()) return
-        val clean = text.filter { it in TYPE_ALLOWED }
-        if (clean.isEmpty()) return
         synchronized(lock) {
-            typePending.append(clean)
+            typePending.append(text)
             typeFuture?.cancel(false)
             typeFuture = typeExecutor.schedule(
                 { flushType() },
@@ -305,7 +371,64 @@ class MirrorInjector {
             typePending = StringBuilder()
             out
         }
-        runCommand("input text " + text.replace(" ", "%s"))
+        if (text.all { it in TYPE_ALLOWED }) {
+            runCommand("input text " + text.replace(" ", "%s"))
+            return
+        }
+        if (NbIme.commit(text)) {
+            return
+        }
+        if (!pasteText(text)) {
+            val clean = text.filter { it in TYPE_ALLOWED }
+            if (clean.isNotEmpty()) {
+                runCommand("input text " + clean.replace(" ", "%s"))
+            }
+        }
+    }
+
+    private fun pasteText(text: String): Boolean {
+        return try {
+            var flushNow = false
+            synchronized(lock) {
+                clipPending.append(text)
+                clipFuture?.cancel(false)
+                if (clipPending.length >= CLIP_MAX || clipPending.last().isWhitespace()) {
+                    flushNow = true
+                } else {
+                    clipFuture = typeExecutor.schedule(
+                        { flushClip() },
+                        CLIP_FLUSH_MS,
+                        java.util.concurrent.TimeUnit.MILLISECONDS,
+                    )
+                }
+            }
+            if (flushNow) {
+                flushClip()
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun flushClip() {
+        val text = synchronized(lock) {
+            clipFuture?.cancel(false)
+            clipFuture = null
+            if (clipPending.isEmpty()) {
+                return
+            }
+            val out = clipPending.toString()
+            clipPending = StringBuilder()
+            out
+        }
+        try {
+            val context = AppGraph.appContext
+            val manager = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            manager.setPrimaryClip(android.content.ClipData.newPlainText("nb", text))
+            runCommand("input keyevent " + android.view.KeyEvent.KEYCODE_PASTE)
+        } catch (_: Exception) {
+        }
     }
 
     private fun handleScroll(body: JsonObject) {
@@ -321,20 +444,23 @@ class MirrorInjector {
             }
             return
         }
-        val cx = (lastX * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
-        val cy = (lastY * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
+        val info = dispInfo()
+        val w = info.first
+        val h = info.second
+        val cx = (lastX * (w - 1)).toInt().coerceIn(0, w - 1)
+        val cy = (lastY * (h - 1)).toInt().coerceIn(0, h - 1)
         val travel = 200
         val (x1, y1, x2, y2) = if (kotlin.math.abs(dy) >= kotlin.math.abs(dx)) {
             if (dy > 0) {
-                Quad(cx, (cy + travel / 2).coerceAtMost(screenH - 1), cx, (cy - travel / 2).coerceAtLeast(0))
+                Quad(cx, (cy + travel / 2).coerceAtMost(h - 1), cx, (cy - travel / 2).coerceAtLeast(0))
             } else {
-                Quad(cx, (cy - travel / 2).coerceAtLeast(0), cx, (cy + travel / 2).coerceAtMost(screenH - 1))
+                Quad(cx, (cy - travel / 2).coerceAtLeast(0), cx, (cy + travel / 2).coerceAtMost(h - 1))
             }
         } else {
             if (dx > 0) {
-                Quad((cx + travel / 2).coerceAtMost(screenW - 1), cy, (cx - travel / 2).coerceAtLeast(0), cy)
+                Quad((cx + travel / 2).coerceAtMost(w - 1), cy, (cx - travel / 2).coerceAtLeast(0), cy)
             } else {
-                Quad((cx - travel / 2).coerceAtLeast(0), cy, (cx + travel / 2).coerceAtMost(screenW - 1), cy)
+                Quad((cx - travel / 2).coerceAtLeast(0), cy, (cx + travel / 2).coerceAtMost(w - 1), cy)
             }
         }
         runCommand("input swipe " + x1 + " " + y1 + " " + x2 + " " + y2 + " 150")
@@ -345,8 +471,9 @@ class MirrorInjector {
         val cy = ny.coerceIn(0.0, 1.0)
         lastX = cx
         lastY = cy
-        val px = (cx * (screenW - 1)).toInt()
-        val py = (cy * (screenH - 1)).toInt()
+        val info = dispInfo()
+        val px = (cx * (info.first - 1)).toInt()
+        val py = (cy * (info.second - 1)).toInt()
         runCommand("input tap " + px + " " + py)
     }
 
@@ -355,8 +482,9 @@ class MirrorInjector {
         val cy = ny.coerceIn(0.0, 1.0)
         lastX = cx
         lastY = cy
-        val px = (cx * (screenW - 1)).toInt()
-        val py = (cy * (screenH - 1)).toInt()
+        val info = dispInfo()
+        val px = (cx * (info.first - 1)).toInt()
+        val py = (cy * (info.second - 1)).toInt()
         runCommand("input swipe " + px + " " + py + " " + px + " " + py + " 500")
     }
 
@@ -431,6 +559,8 @@ class MirrorInjector {
     private companion object {
         const val SCROLL_THROTTLE_MS = 120L
         const val TYPE_FLUSH_MS = 60L
+        const val CLIP_FLUSH_MS = 150L
+        const val CLIP_MAX = 10
         const val DRAG_THRESHOLD_PX = 16
         const val TYPE_ALLOWED = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,?!_-'\""
 

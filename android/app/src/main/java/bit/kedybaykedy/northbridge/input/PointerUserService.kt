@@ -16,7 +16,7 @@ class PointerUserService : Service() {
         try {
             Thread({
                 if (PointerJni.loadExplicit(NativePointer.TMP_LIB)) {
-                    PointerDaemon.serve(NativePointer.SOCK_PATH)
+                    PointerDaemon.serve(NativePointer.sockPath())
                 }
             }, "nbpointerd").start()
         } catch (_: Exception) {
