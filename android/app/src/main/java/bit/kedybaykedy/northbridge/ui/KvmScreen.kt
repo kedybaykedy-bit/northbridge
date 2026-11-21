@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
+import bit.kedybaykedy.northbridge.ui.theme.AntonFamily
+import bit.kedybaykedy.northbridge.ui.theme.ArchivoBlackFamily
+import bit.kedybaykedy.northbridge.ui.theme.CourierPrimeFamily
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -63,19 +66,6 @@ private val G7 = Color(0xFF9A9A9A)
 private val G8 = Color(0xFFC0C0C0)
 private val G9 = Color(0xFFCFCFCF)
 private val Ink = Color(0xFFF2F2F2)
-
-private fun Modifier.skewX(degrees: Float): Modifier = this.drawWithContent {
-    val shear = tan(degrees * PI / 180.0).toFloat()
-    drawIntoCanvas { canvas ->
-        canvas.save()
-        canvas.skew(shear, 0f)
-        canvas.translate(-shear * size.height / 2f, 0f)
-    }
-    drawContent()
-    drawIntoCanvas { canvas ->
-        canvas.restore()
-    }
-}
 
 @Composable
 fun KvmScreen(viewModel: KvmViewModel = viewModel()) {
@@ -198,7 +188,7 @@ private fun Masthead(alias: String?, phase: KvmPhase, connection: ConnectionStat
             Text(
                 text = "KVM · $deviceLabel · $connectionLabel · $phaseLabel",
                 style = TextStyle(
-                    fontFamily = FontFamily.Default,
+                    fontFamily = ArchivoBlackFamily,
                     fontWeight = FontWeight.Black,
                     fontSize = 11.sp,
                     letterSpacing = 3.sp,
@@ -211,7 +201,7 @@ private fun Masthead(alias: String?, phase: KvmPhase, connection: ConnectionStat
             text = "SECOND MONITOR",
             modifier = Modifier.skewX(-6f),
             style = TextStyle(
-                fontFamily = FontFamily.Default,
+                fontFamily = AntonFamily,
                 fontWeight = FontWeight.Black,
                 fontStyle = FontStyle.Italic,
                 fontSize = 28.sp,
@@ -289,7 +279,7 @@ private fun EmptyOverlay(phase: KvmPhase, connection: ConnectionState) {
         Text(
             text = kicker,
             style = TextStyle(
-                fontFamily = FontFamily.Default,
+                fontFamily = ArchivoBlackFamily,
                 fontWeight = FontWeight.Black,
                 fontSize = 11.sp,
                 letterSpacing = 3.sp,
@@ -301,7 +291,7 @@ private fun EmptyOverlay(phase: KvmPhase, connection: ConnectionState) {
             text = hint,
             textAlign = TextAlign.Center,
             style = TextStyle(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = CourierPrimeFamily,
                 fontSize = 12.sp,
                 lineHeight = 20.sp,
                 color = G8,
@@ -331,7 +321,7 @@ private fun BottomBar(
         Text(
             text = coords,
             style = TextStyle(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = CourierPrimeFamily,
                 fontSize = 11.sp,
                 letterSpacing = 0.5.sp,
                 color = G6,
@@ -341,7 +331,7 @@ private fun BottomBar(
         Text(
             text = "SEK 1 · FIG 1 — IKINCI EKRAN",
             style = TextStyle(
-                fontFamily = FontFamily.Default,
+                fontFamily = ArchivoBlackFamily,
                 fontWeight = FontWeight.Black,
                 fontSize = 10.sp,
                 letterSpacing = 2.sp,
@@ -365,7 +355,7 @@ private fun BottomBar(
         Text(
             text = "Dokunus: tik gonderir. Yakalamadayken masaustu fareyi surer.",
             style = TextStyle(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = CourierPrimeFamily,
                 fontSize = 11.sp,
                 lineHeight = 16.sp,
                 color = G9,
@@ -397,7 +387,7 @@ private fun MmTag(label: String) {
                 text = label,
                 modifier = Modifier.skewX(10f),
                 style = TextStyle(
-                    fontFamily = FontFamily.Default,
+                    fontFamily = AntonFamily,
                     fontWeight = FontWeight.Black,
                     fontSize = 16.sp,
                     letterSpacing = 0.8.sp,
@@ -452,7 +442,7 @@ private fun MmButton(label: String, primary: Boolean, onClick: () -> Unit) {
                 text = label,
                 modifier = Modifier.skewX(10f),
                 style = TextStyle(
-                    fontFamily = FontFamily.Default,
+                    fontFamily = AntonFamily,
                     fontWeight = FontWeight.Black,
                     fontSize = 16.sp,
                     letterSpacing = 0.8.sp,

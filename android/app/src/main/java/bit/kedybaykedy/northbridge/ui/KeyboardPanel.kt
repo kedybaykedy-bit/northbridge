@@ -47,15 +47,6 @@ import kotlin.math.tan
 
 private const val SKEW_DEGREES = -10f
 
-fun Modifier.skewX(degrees: Float): Modifier = this.drawWithContent {
-    val skew = tan(degrees * Math.PI.toFloat() / 180f)
-    drawContext.canvas.save()
-    drawContext.canvas.translate(-skew * size.height / 2f, 0f)
-    drawContext.canvas.skew(skew, 0f)
-    drawContent()
-    drawContext.canvas.restore()
-}
-
 private data class SpecialKey(val label: String, val code: Int)
 
 private val toolbarSpecials = listOf(

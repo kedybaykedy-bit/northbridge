@@ -101,7 +101,7 @@ class ScreenViewModel : ViewModel() {
         fps = 0
         val device = activeDevice()
         if (device == null) {
-            _error.value = "Once Cihazlar sekmesinde bir masaüstü eslestir"
+            _error.value = "Önce Cihazlar sekmesinde bir masaüstü eşleştir"
             _uiState.value = ScreenUiState.IDLE
             sessionActive = false
             return
@@ -135,7 +135,7 @@ class ScreenViewModel : ViewModel() {
         }
         val sent = AppGraph.inputChannel.sendPacket(KIND_SCREEN, openBody())
         if (!sent) {
-            _error.value = "Dokunmatik akis bagli degil"
+            _error.value = "Dokunmatik akış bağlı değil"
             _uiState.value = ScreenUiState.IDLE
             controlJob?.cancel()
             sessionActive = false
@@ -144,14 +144,14 @@ class ScreenViewModel : ViewModel() {
         val port = try {
             withTimeout(OPEN_WAIT_MS) { opened.await() }
         } catch (_: Exception) {
-            _error.value = "Masaüstü yanit vermedi"
+            _error.value = "Masaüstü yanıt vermedi"
             _uiState.value = ScreenUiState.IDLE
             controlJob?.cancel()
             sessionActive = false
             return
         }
         if (port == null) {
-            _error.value = "Masaüstü akisi kapatti"
+            _error.value = "Masaüstü akışı kapattı"
             _uiState.value = ScreenUiState.IDLE
             controlJob?.cancel()
             sessionActive = false

@@ -15,8 +15,25 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.unit.dp
 import bit.kedybaykedy.northbridge.transport.ConnectionState
+import kotlin.math.PI
+import kotlin.math.tan
+
+internal fun Modifier.skewX(degrees: Float): Modifier = this.drawWithContent {
+    val shear = tan(degrees * PI / 180.0).toFloat()
+    drawIntoCanvas { canvas ->
+        canvas.save()
+        canvas.skew(shear, 0f)
+        canvas.translate(-shear * size.height / 2f, 0f)
+    }
+    drawContent()
+    drawIntoCanvas { canvas ->
+        canvas.restore()
+    }
+}
 
 @Composable
 fun ConnectionBanner(connection: ConnectionState, modifier: Modifier = Modifier) {

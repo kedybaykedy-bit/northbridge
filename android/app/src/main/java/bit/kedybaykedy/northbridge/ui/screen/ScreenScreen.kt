@@ -197,7 +197,7 @@ fun ScreenScreen(viewModel: ScreenViewModel = viewModel()) {
 
     val stateLabel = when (uiState) {
         ScreenUiState.LIVE -> "AKIŞ"
-        ScreenUiState.WAITING -> "BEKLENIYOR"
+        ScreenUiState.WAITING -> "BEKLENİYOR"
         ScreenUiState.IDLE -> "KAPALI"
     }
     val monoFilter = remember {
