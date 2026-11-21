@@ -5,11 +5,7 @@ import androidx.lifecycle.viewModelScope
 import bit.kedybaykedy.northbridge.AppGraph
 import bit.kedybaykedy.northbridge.data.DiscoveredDevice
 import bit.kedybaykedy.northbridge.data.TrustedDevice
-import bit.kedybaykedy.northbridge.discovery.HeardAnnouncement
-import bit.kedybaykedy.northbridge.discovery.MulticastDiscovery
 import bit.kedybaykedy.northbridge.pairing.PairingClient
-import bit.kedybaykedy.northbridge.transport.HttpApi
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,8 +28,7 @@ data class DiscoveryUiState(
 
 class DiscoveryViewModel : ViewModel() {
 
-    private val discovery = MulticastDiscovery(AppGraph.appContext)
-    private val lastProbeAt = ConcurrentHashMap<String, Long>()
+    private val hub = AppGraph.discoveryHub
 
     private val _state = MutableStateFlow(DiscoveryUiState())
     val state: StateFlow<DiscoveryUiState> = _state.asStateFlow()
@@ -43,6 +38,11 @@ class DiscoveryViewModel : ViewModel() {
 
     init {
         viewModelScope.launch {
+            hub.devices.collect { devices ->
+                _state.update { it.copy(devices = devices) }
+            }
+        }
+        viewModelScope.launch {
             AppGraph.deviceStore.devices.collect { trusted ->
                 _paired.value = trusted.map { it.fingerprint }.toSet()
             }
@@ -50,42 +50,7 @@ class DiscoveryViewModel : ViewModel() {
     }
 
     fun startDiscovery() {
-        discovery.start(viewModelScope) { heard -> onHeard(heard) }
-    }
-
-    override fun onCleared() {
-        discovery.stop()
-    }
-
-    private fun onHeard(heard: HeardAnnouncement) {
-        val message = heard.message
-        val now = System.currentTimeMillis()
-        val key = "${heard.host}:${message.port}"
-        _state.update { state ->
-            val existing = state.devices.find { it.key == key }
-            val updated = if (existing != null) {
-                existing.copy(
-                    alias = message.alias,
-                    version = message.version,
-                    deviceType = message.deviceType,
-                    lastSeen = now,
-                )
-            } else {
-                DiscoveredDevice(
-                    host = heard.host,
-                    port = message.port,
-                    alias = message.alias,
-                    fingerprint = null,
-                    version = message.version,
-                    deviceType = message.deviceType,
-                    lastSeen = now,
-                )
-            }
-            state.copy(devices = state.devices.filterNot { it.key == key } + updated)
-        }
-        viewModelScope.launch {
-            probe(key, heard.host, message.port, force = false)
-        }
+        hub.start()
     }
 
     fun probeManual(address: String) {
@@ -96,31 +61,11 @@ class DiscoveryViewModel : ViewModel() {
         }
         val (host, port) = parsed
         viewModelScope.launch {
-            val probed = probe("$host:$port", host, port, force = true)
+            val probed = hub.probe("$host:$port", host, port, force = true)
             _state.update {
                 it.copy(message = if (probed) "Probed $host:$port" else "$host:$port unreachable")
             }
         }
-    }
-
-    private suspend fun probe(key: String, host: String, port: Int, force: Boolean): Boolean {
-        val now = System.currentTimeMillis()
-        if (!force && now - (lastProbeAt[key] ?: 0L) < PROBE_THROTTLE_MS) return false
-        lastProbeAt[key] = now
-        val result = HttpApi.probe(host, port, AppGraph.identity) ?: return false
-        _state.update { state ->
-            val entry = DiscoveredDevice(
-                host = host,
-                port = port,
-                alias = result.alias,
-                fingerprint = result.fingerprint,
-                version = result.version,
-                deviceType = result.deviceType,
-                lastSeen = System.currentTimeMillis(),
-            )
-            state.copy(devices = state.devices.filterNot { it.key == key } + entry)
-        }
-        return true
     }
 
     fun requestPair(device: DiscoveredDevice) {
@@ -189,8 +134,6 @@ class DiscoveryViewModel : ViewModel() {
     }
 
     companion object {
-        private const val PROBE_THROTTLE_MS = 4000L
-
         fun parseAddress(raw: String): Pair<String, Int>? {
             val address = raw.trim()
             if (address.isEmpty()) return null

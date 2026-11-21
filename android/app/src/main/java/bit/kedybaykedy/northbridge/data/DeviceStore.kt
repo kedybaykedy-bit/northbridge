@@ -1,6 +1,7 @@
 package bit.kedybaykedy.northbridge.data
 
 import android.content.SharedPreferences
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,6 +46,21 @@ class DeviceStore(private val prefs: SharedPreferences) {
         if (_activeFingerprint.value == fingerprint) {
             setActive(null)
         }
+    }
+
+    fun observeAddress(fingerprint: String, host: String, httpPort: Int) {
+        val list = _devices.value
+        val index = list.indexOfFirst { it.fingerprint == fingerprint }
+        if (index < 0) return
+        val existing = list[index]
+        if (existing.host == host && existing.httpPort == httpPort) return
+        val updated = list.toMutableList()
+        updated[index] = existing.copy(host = host, httpPort = httpPort)
+        persist(updated)
+        Log.d(
+            "northbridge",
+            "address refreshed ${existing.alias}: ${existing.host}:${existing.httpPort} -> $host:$httpPort",
+        )
     }
 
     fun setActive(fingerprint: String?) {

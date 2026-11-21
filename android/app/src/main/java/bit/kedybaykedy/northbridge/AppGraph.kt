@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import bit.kedybaykedy.northbridge.data.DeviceStore
+import bit.kedybaykedy.northbridge.discovery.DiscoveryHub
 import bit.kedybaykedy.northbridge.transport.IdentityStore
 import bit.kedybaykedy.northbridge.transport.InputChannel
 import bit.kedybaykedy.northbridge.transport.PhoneIdentity
@@ -32,10 +33,13 @@ object AppGraph {
         InputChannel(identity, CoroutineScope(SupervisorJob() + Dispatchers.IO))
     }
 
+    val discoveryHub: DiscoveryHub by lazy { DiscoveryHub() }
+
     fun init(application: Application) {
         if (::context.isInitialized) return
         context = application.applicationContext
         appScope.launch { identity.fingerprint }
+        discoveryHub.start()
         appScope.launch {
             combine(deviceStore.devices, deviceStore.activeFingerprint) { devices, fingerprint ->
                 devices.find { it.fingerprint == fingerprint }

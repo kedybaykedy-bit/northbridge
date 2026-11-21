@@ -1,6 +1,7 @@
 package bit.kedybaykedy.northbridge.transport
 
 import android.util.Log
+import bit.kedybaykedy.northbridge.AppGraph
 import bit.kedybaykedy.northbridge.data.TrustedDevice
 import java.io.BufferedReader
 import java.io.IOException
@@ -29,6 +30,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlin.coroutines.coroutineContext
 
 enum class ConnectionState {
@@ -130,10 +133,24 @@ class InputChannel(
         }
     }
 
-    private suspend fun runConnection(target: TrustedDevice, ownGeneration: Int) {
+    private fun refreshTarget(known: TrustedDevice): TrustedDevice {
+        val fresh = AppGraph.deviceStore.devices.value.find { it.fingerprint == known.fingerprint }
+            ?: return known
+        if (fresh.host != known.host || fresh.httpPort != known.httpPort) {
+            Log.d(
+                "northbridge",
+                "packet dial target refreshed ${known.host}:${known.httpPort} -> ${fresh.host}:${fresh.httpPort}",
+            )
+        }
+        return fresh
+    }
+
+    private suspend fun runConnection(initial: TrustedDevice, ownGeneration: Int) {
         var attempt = 0
+        var target = initial
         try {
             while (true) {
+                target = refreshTarget(target)
                 setState(
                     ownGeneration,
                     if (attempt == 0) ConnectionState.CONNECTING else ConnectionState.RECONNECTING,
@@ -220,6 +237,16 @@ class InputChannel(
                 val packet = parsePacket(line) ?: continue
                 if (packet.kind != KIND_OPEN) continue
                 if (!isAccepted(packet.body)) throw IOException("stream open rejected")
+                writePacket(
+                    NetworkPacket(
+                        id = System.currentTimeMillis(),
+                        kind = KIND_ADDR,
+                        body = buildJsonObject {
+                            put("port", HTTP_PORT)
+                            put("alias", identity.alias)
+                        },
+                    ),
+                )
                 return
             }
         } finally {
@@ -358,6 +385,8 @@ class InputChannel(
         const val OPEN_ACK_TIMEOUT_MS = 5000
         const val KIND_OPEN = "nb.touchpad.open"
         const val KIND_TOUCHPAD = "nb.touchpad"
+        const val KIND_ADDR = "nb.addr"
+        const val HTTP_PORT = 53317
         const val KIND_KVM = "nb.kvm"
         const val KIND_ERROR = "nb.error"
     }

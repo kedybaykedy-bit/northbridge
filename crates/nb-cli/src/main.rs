@@ -447,8 +447,37 @@ fn make_handler(
 ) -> PacketHandler {
     let own_alias = identity.alias.clone();
     let own_fp = identity.fingerprint.clone();
-    Arc::new(move |peer_fp: &str, channel: Channel, _remote: &std::net::SocketAddr, pkt: NetworkPacket| {
+    Arc::new(move |peer_fp: &str, channel: Channel, remote: &std::net::SocketAddr, pkt: NetworkPacket| {
         match pkt.kind.as_str() {
+            "nb.addr" => {
+                let port = pkt.body.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                if port != 0 {
+                    let raw = remote.ip().to_string();
+                    let host = raw.strip_prefix("::ffff:").unwrap_or(&raw).to_string();
+                    let mut p = peers.lock().unwrap();
+                    let alias = p
+                        .peers
+                        .get(peer_fp)
+                        .map(|e| e.alias.clone())
+                        .unwrap_or_default();
+                    let changed = p
+                        .peers
+                        .get(peer_fp)
+                        .and_then(|e| e.addrs.get(&channel))
+                        .map(|a| a.host != host || a.http_port != port)
+                        .unwrap_or(true);
+                    if changed {
+                        p.observe(peer_fp, &alias, channel, &host, port);
+                        let _ = p.save();
+                        println!(
+                            "[addr] {} ({fp12}) via {channel} -> {host}:{port}",
+                            if alias.is_empty() { "peer" } else { &alias },
+                            fp12 = &peer_fp[..12.min(peer_fp.len())],
+                        );
+                    }
+                }
+                None
+            }
             PAIR_TYPE => {
                 let mut p = peers.lock().unwrap();
                 let accepted = auto_pair;
