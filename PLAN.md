@@ -70,8 +70,8 @@ northbridge/
   referans). E2E handshake+kare ✓; gerçek cihaz testi bekliyor.
 - **M4 (kod tamam ✓):** `docs/M4-RESEARCH.md` uygulandı — `nb-audio` crate:
   NBA1 (24B LE) çift yönlü, port 53320, PCM garantili yol; pipewire/opus/cpal
-  yolları feature arkasında (`sudo dnf install pipewire-devel opus-devel
-  alsa-lib-devel` + `--features pipewire-cap,opus,cpal-out` ile tam aktif).
+  yolları default açık (paketler kuruldu); canlı sistem-sesi doğrulandı —
+  probe 6 sn'de 299 kare, ton tepe değeri 11999/12000.
   Android: `AudioClient` (mikrofon + root sistem-sesi, AudioTrack, MediaCodec
   opus best-effort), MM-01 SES ekranı. E2E handshake+kare ✓
 - **M4:** ses köprüsü (cpal + Opus/UDP)

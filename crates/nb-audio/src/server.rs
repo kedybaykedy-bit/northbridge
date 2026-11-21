@@ -16,6 +16,8 @@ use crate::codec::{Codec, decode_frame, encode_frame};
 use crate::control::AUDIO_OPEN_KIND;
 use crate::frame::{self, Direction, FrameMeta, direction_of};
 use crate::playback::{AudioSink, NullSink};
+#[cfg(feature = "cpal-out")]
+use crate::playback::CpalSink;
 use crate::queue::{AUDIO_QUEUE_CAP, AudioQueue, QueuedAudio};
 
 pub const PORT_OFFSET: u16 = 3;
@@ -179,7 +181,16 @@ fn spawn_playback(inner: Arc<ServerInner>) {
     let _ = std::thread::Builder::new()
         .name("nb-audio-playback".into())
         .spawn(move || {
-            let mut sink = NullSink::new();
+            #[cfg(feature = "cpal-out")]
+            let mut sink: Box<dyn AudioSink> = match CpalSink::open() {
+                Ok(s) => Box::new(s),
+                Err(e) => {
+                    eprintln!("[audio] cpal sink unavailable: {e:#}");
+                    Box::new(NullSink::new())
+                }
+            };
+            #[cfg(not(feature = "cpal-out"))]
+            let mut sink: Box<dyn AudioSink> = Box::new(NullSink::new());
             eprintln!("[audio] playback sink: {}", sink.sink_name());
             loop {
                 std::thread::sleep(Duration::from_millis(crate::codec::FRAME_MS));

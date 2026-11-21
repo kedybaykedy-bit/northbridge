@@ -1,4 +1,6 @@
 #[cfg(feature = "cpal-out")]
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "cpal-out")]
 use std::collections::VecDeque;
 #[cfg(feature = "cpal-out")]
 use std::sync::{Arc, Mutex};
@@ -53,9 +55,9 @@ impl CpalSink {
         let config: cpal::StreamConfig = supported.into();
         let ring: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let producer = ring.clone();
-        let cap = config.sample_rate.0 as usize * config.channels as usize;
+        let cap = config.sample_rate as usize * config.channels as usize;
         let stream = device.build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut guard = producer.lock().unwrap();
                 for slot in data.iter_mut() {

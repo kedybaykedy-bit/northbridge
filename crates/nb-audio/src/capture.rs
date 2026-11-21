@@ -53,27 +53,71 @@ pub struct PipewireSource {
 #[cfg(feature = "pipewire-cap")]
 impl PipewireSource {
     pub fn connect() -> anyhow::Result<Self> {
-        use pipewire as pw;
-        use pw::properties::properties;
-        use pw::spa::param::format::{MediaSubtype, MediaType};
-        use pw::spa::param::format_utils;
-        use pw::spa::pod::Pod;
-        use std::convert::TryInto;
-        use std::mem;
+        use anyhow::Context;
+        let (samples_tx, rx) = std::sync::mpsc::sync_channel::<Vec<i16>>(8);
+        let format = Arc::new(std::sync::Mutex::new((
+            crate::codec::SAMPLE_RATE,
+            crate::codec::CHANNELS as u32,
+        )));
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<()>>(1);
+        let format_in = Arc::clone(&format);
+        std::thread::Builder::new()
+            .name("nb-audio-pipewire".into())
+            .spawn(move || run_mainloop(samples_tx, format_in, ready_tx))?;
+        ready_rx
+            .recv()
+            .context("pipewire thread exited during setup")??;
+        Ok(PipewireSource {
+            rx,
+            stash: VecDeque::new(),
+            format,
+        })
+    }
+}
 
-        pw::init();
-        let mainloop = pw::main_loop::MainLoop::new(None)?;
-        let context = pw::context::Context::new(&mainloop)?;
-        let core = context.connect(None)?;
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<i16>>(8);
-        let state = CaptureState {
-            tx,
-            format: Arc::new(std::sync::Mutex::new((
-                crate::codec::SAMPLE_RATE,
-                crate::codec::CHANNELS as u32,
-            ))),
-        };
-        let format_slot = state.format.clone();
+#[cfg(feature = "pipewire-cap")]
+fn run_mainloop(
+    samples_tx: std::sync::mpsc::SyncSender<Vec<i16>>,
+    format: Arc<std::sync::Mutex<(u32, u32)>>,
+    ready_tx: std::sync::mpsc::SyncSender<anyhow::Result<()>>,
+) {
+    match build_pipeline(samples_tx, format) {
+        Ok((mainloop, stream, listener)) => {
+            let _ = ready_tx.send(Ok(()));
+            mainloop.run();
+            drop((stream, listener));
+        }
+        Err(err) => {
+            let _ = ready_tx.send(Err(err));
+        }
+    }
+}
+
+#[cfg(feature = "pipewire-cap")]
+fn build_pipeline(
+    samples_tx: std::sync::mpsc::SyncSender<Vec<i16>>,
+    format: Arc<std::sync::Mutex<(u32, u32)>>,
+) -> anyhow::Result<(
+    pipewire::main_loop::MainLoop,
+    pipewire::stream::Stream,
+    pipewire::stream::StreamListener<CaptureState>,
+)> {
+    use pipewire as pw;
+    use pw::properties::properties;
+    use pw::spa::param::format::{MediaSubtype, MediaType};
+    use pw::spa::param::format_utils;
+    use pw::spa::pod::Pod;
+    use std::convert::TryInto;
+    use std::mem;
+
+    pw::init();
+    let mainloop = pw::main_loop::MainLoop::new(None)?;
+    let context = pw::context::Context::new(&mainloop)?;
+    let core = context.connect(None)?;
+    let state = CaptureState {
+        tx: samples_tx,
+        format,
+    };
         let props = properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
             *pw::keys::MEDIA_CATEGORY => "Capture",
@@ -81,7 +125,7 @@ impl PipewireSource {
             *pw::keys::STREAM_CAPTURE_SINK => "true",
         };
         let stream = pw::stream::Stream::new(&core, "northbridge-capture", props)?;
-        let _listener = stream
+        let listener = stream
             .add_local_listener_with_user_data(state)
             .param_changed(|_, state, id, param| {
                 let Some(param) = param else { return };
@@ -142,16 +186,8 @@ impl PipewireSource {
                 | pw::stream::StreamFlags::RT_PROCESS,
             &mut params,
         )?;
-        std::thread::Builder::new()
-            .name("nb-audio-pipewire".into())
-            .spawn(move || mainloop.run())?;
-        Ok(PipewireSource {
-            rx,
-            stash: VecDeque::new(),
-            format: format_slot,
-        })
+        Ok((mainloop, stream, listener))
     }
-}
 
 #[cfg(feature = "pipewire-cap")]
 impl AudioSource for PipewireSource {
