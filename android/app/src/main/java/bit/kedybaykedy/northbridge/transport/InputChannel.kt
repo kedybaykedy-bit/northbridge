@@ -57,6 +57,12 @@ class InputChannel(
     )
     val messages: SharedFlow<InputMsg> = _messages.asSharedFlow()
 
+    private val _controlPackets = MutableSharedFlow<NetworkPacket>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val controlPackets: SharedFlow<NetworkPacket> = _controlPackets.asSharedFlow()
+
     private val outbox = Channel<InputMsg>(Channel.UNLIMITED)
     private val writeLock = Any()
     private var connectionJob: Job? = null
@@ -92,6 +98,21 @@ class InputChannel(
     fun send(msg: InputMsg) {
         if (attached == null) return
         outbox.trySend(msg)
+    }
+
+    fun sendPacket(kind: String, body: JsonElement): Boolean {
+        return try {
+            writePacket(
+                NetworkPacket(
+                    id = System.currentTimeMillis(),
+                    kind = kind,
+                    body = body,
+                ),
+            )
+            true
+        } catch (_: IOException) {
+            false
+        }
     }
 
     private fun setState(ownGeneration: Int, state: ConnectionState) {
@@ -249,6 +270,9 @@ class InputChannel(
                 }
                 KIND_OPEN -> Unit
                 KIND_ERROR -> Unit
+                KIND_SCREEN -> {
+                    _controlPackets.tryEmit(packet)
+                }
                 else -> Unit
             }
         }
@@ -323,3 +347,5 @@ class InputChannel(
         const val KIND_ERROR = "nb.error"
     }
 }
+
+const val KIND_SCREEN = "nb.screen"

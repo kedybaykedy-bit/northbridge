@@ -3,6 +3,7 @@ package bit.kedybaykedy.northbridge.ui
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Monitor
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.TouchApp
@@ -19,11 +20,13 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import bit.kedybaykedy.northbridge.ui.screen.ScreenScreen
 
 object Routes {
     const val DISCOVERY = "discovery"
     const val TOUCHPAD = "touchpad"
     const val KVM = "kvm"
+    const val SCREEN = "screen"
     const val DEVICES = "devices"
 }
 
@@ -37,6 +40,7 @@ private val topLevelDestinations = listOf(
     TopLevelDestination(Routes.DISCOVERY, "Discover", Icons.Filled.Search),
     TopLevelDestination(Routes.TOUCHPAD, "Touchpad", Icons.Filled.TouchApp),
     TopLevelDestination(Routes.KVM, "KVM", Icons.Filled.Computer),
+    TopLevelDestination(Routes.SCREEN, "Screen", Icons.Filled.Monitor),
     TopLevelDestination(Routes.DEVICES, "Devices", Icons.Filled.Smartphone),
 )
 
@@ -76,6 +80,7 @@ fun NorthbridgeRoot() {
             composable(Routes.DISCOVERY) { DiscoveryScreen() }
             composable(Routes.TOUCHPAD) { TouchpadScreen() }
             composable(Routes.KVM) { KvmScreen() }
+            composable(Routes.SCREEN) { ScreenScreen() }
             composable(Routes.DEVICES) { DevicesScreen() }
         }
     }

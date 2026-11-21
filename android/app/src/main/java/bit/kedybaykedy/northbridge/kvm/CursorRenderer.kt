@@ -22,6 +22,6 @@ fun DrawScope.drawDesktopCursor(at: Offset) {
         lineTo(at.x + 20f, at.y + 19.5f)
         close()
     }
-    drawPath(path, color = Color.White)
-    drawPath(path, color = Color.Black, style = Stroke(width = 1.5f))
+    drawPath(path, color = Color(0xFFF2F2F2))
+    drawPath(path, color = Color(0xFF0A0A0A), style = Stroke(width = 1.5f))
 }
