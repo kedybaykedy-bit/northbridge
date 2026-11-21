@@ -56,6 +56,7 @@ import bit.kedybaykedy.northbridge.data.DiscoveredDevice
 @Composable
 fun DiscoveryScreen(viewModel: DiscoveryViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
+    val paired by viewModel.paired.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var manualAddress by rememberSaveable { mutableStateOf("") }
 
@@ -128,7 +129,9 @@ fun DiscoveryScreen(viewModel: DiscoveryViewModel = viewModel()) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(state.devices, key = { it.key }) { device ->
-                    DeviceCard(device) { viewModel.requestPair(device) }
+                    DeviceCard(device, device.fingerprint in paired) {
+                        viewModel.requestPair(device)
+                    }
                 }
                 if (state.devices.isEmpty()) {
                     item {
@@ -153,7 +156,7 @@ fun DiscoveryScreen(viewModel: DiscoveryViewModel = viewModel()) {
 }
 
 @Composable
-private fun DeviceCard(device: DiscoveredDevice, onPair: () -> Unit) {
+private fun DeviceCard(device: DiscoveredDevice, paired: Boolean, onPair: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -180,12 +183,18 @@ private fun DeviceCard(device: DiscoveredDevice, onPair: () -> Unit) {
                         )
                     }
                 }
-                if (device.fingerprint != null) {
-                    TextButton(onClick = onPair) {
+                when {
+                    paired -> Text(
+                        "ESLESTI",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+
+                    device.fingerprint != null -> TextButton(onClick = onPair) {
                         Text("Pair")
                     }
-                } else {
-                    CircularProgressIndicator(
+
+                    else -> CircularProgressIndicator(
                         Modifier.size(24.dp),
                     )
                 }

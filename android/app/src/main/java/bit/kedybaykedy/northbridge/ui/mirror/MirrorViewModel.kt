@@ -47,44 +47,40 @@ class MirrorViewModel : ViewModel() {
     val error: StateFlow<String?> = _error.asStateFlow()
 
     private var inputsJob: Job? = null
-    private var stateJob: Job? = null
-    private var statsJob: Job? = null
+    private var metaJob: Job? = null
 
     init {
         val dm = Resources.getSystem().displayMetrics
         injector.setScreenSize(dm.widthPixels, dm.heightPixels)
-        stateJob = ioScope.launch {
-            client.state.collect { link ->
-                when (link) {
-                    MirrorLinkState.Idle -> {
-                        _uiState.value = MirrorUiState.IDLE
-                        _meta.value = ""
-                    }
-                    MirrorLinkState.Opening -> {
-                        _uiState.value = MirrorUiState.IDLE
-                        _meta.value = "MASAUSTU YANITI BEKLENIYOR..."
-                    }
-                    MirrorLinkState.Live -> {
-                        _uiState.value = MirrorUiState.MIRRORING
-                        _error.value = null
-                    }
-                    is MirrorLinkState.Error -> {
-                        _uiState.value = MirrorUiState.ERROR
-                        _error.value = link.reason
-                        _meta.value = ""
+        metaJob = ioScope.launch {
+            combine(client.state, client.stats) { link, stats -> link to stats }
+                .collect { (link, stats) ->
+                    when (link) {
+                        MirrorLinkState.Idle -> {
+                            _uiState.value = MirrorUiState.IDLE
+                            _meta.value = ""
+                        }
+                        MirrorLinkState.Opening -> {
+                            _uiState.value = MirrorUiState.IDLE
+                            _meta.value = "MASAUSTU YANITI BEKLENIYOR..."
+                        }
+                        MirrorLinkState.Live -> {
+                            _uiState.value = MirrorUiState.MIRRORING
+                            _error.value = null
+                            _meta.value = if (stats == null) {
+                                ""
+                            } else {
+                                "${stats.kbps} KBPS · ${stats.fps} FPS · " +
+                                    "${stats.width}X${stats.height} · SEQ ${stats.seq}"
+                            }
+                        }
+                        is MirrorLinkState.Error -> {
+                            _uiState.value = MirrorUiState.ERROR
+                            _error.value = link.reason
+                            _meta.value = ""
+                        }
                     }
                 }
-            }
-        }
-        statsJob = ioScope.launch {
-            client.stats.collect { stats ->
-                _meta.value = if (stats == null) {
-                    ""
-                } else {
-                    "" + stats.kbps + " KBPS \u00B7 " + stats.fps + " FPS \u00B7 " +
-                        stats.width + "X" + stats.height + " \u00B7 SEQ " + stats.seq
-                }
-            }
         }
         inputsJob = ioScope.launch {
             client.inputs.collect { body ->
@@ -132,8 +128,7 @@ class MirrorViewModel : ViewModel() {
 
     override fun onCleared() {
         inputsJob?.cancel()
-        stateJob?.cancel()
-        statsJob?.cancel()
+        metaJob?.cancel()
         try {
             client.stopMirror()
         } catch (_: Exception) {

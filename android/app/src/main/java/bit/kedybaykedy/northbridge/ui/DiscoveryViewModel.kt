@@ -38,6 +38,17 @@ class DiscoveryViewModel : ViewModel() {
     private val _state = MutableStateFlow(DiscoveryUiState())
     val state: StateFlow<DiscoveryUiState> = _state.asStateFlow()
 
+    private val _paired = MutableStateFlow<Set<String>>(emptySet())
+    val paired: StateFlow<Set<String>> = _paired.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            AppGraph.deviceStore.devices.collect { trusted ->
+                _paired.value = trusted.map { it.fingerprint }.toSet()
+            }
+        }
+    }
+
     fun startDiscovery() {
         discovery.start(viewModelScope) { heard -> onHeard(heard) }
     }
@@ -115,6 +126,10 @@ class DiscoveryViewModel : ViewModel() {
     fun requestPair(device: DiscoveredDevice) {
         if (device.fingerprint == null) {
             _state.update { it.copy(message = "Waiting for probe of ${device.host}:${device.port}") }
+            return
+        }
+        if (device.fingerprint in _paired.value) {
+            _state.update { it.copy(message = "Already paired with ${device.alias}") }
             return
         }
         val pin = Random.nextInt(10000).toString().padStart(4, '0')

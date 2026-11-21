@@ -32,7 +32,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 const PAIR_TYPE: &str = "nb.pair";
-const STAGE_INTERVAL: Duration = Duration::from_secs(60);
+const STAGE_INTERVAL: Duration = Duration::from_secs(15);
 /// Upper bound for one staged-discovery pass (announce + probes + subnet
 /// scan). Keeps `pair`/`ping` from hanging when a scan stalls.
 const STAGED_TIMEOUT: Duration = Duration::from_secs(20);
