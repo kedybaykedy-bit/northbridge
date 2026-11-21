@@ -7,6 +7,8 @@ members = [
     "crates/nb-cli",
     "crates/nb-input",
     "crates/nb-screen",
+    "crates/nb-audio",
+    "crates/nb-mirror",
     "plugins/nb-ping",
     "plugins/nb-clipboard",
 ]
@@ -20,6 +22,8 @@ license = "GPL-3.0-or-later"
 nb-core = { path = "crates/nb-core" }
 nb-transport = { path = "crates/nb-transport" }
 nb-screen = { path = "crates/nb-screen" }
+nb-audio = { path = "crates/nb-audio" }
+nb-mirror = { path = "crates/nb-mirror" }
 nb-discovery = { path = "crates/nb-discovery" }
 nb-input = { path = "crates/nb-input" }
 nb-ping = { path = "plugins/nb-ping" }

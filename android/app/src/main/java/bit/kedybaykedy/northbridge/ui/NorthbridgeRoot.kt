@@ -2,11 +2,15 @@ package bit.kedybaykedy.northbridge.ui
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.Monitor
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.VolumeUp
+import bit.kedybaykedy.northbridge.ui.audio.AudioScreen
+import bit.kedybaykedy.northbridge.ui.mirror.MirrorScreen
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -27,6 +31,8 @@ object Routes {
     const val TOUCHPAD = "touchpad"
     const val KVM = "kvm"
     const val SCREEN = "screen"
+    const val MIRROR = "mirror"
+    const val AUDIO = "audio"
     const val DEVICES = "devices"
 }
 
@@ -41,6 +47,8 @@ private val topLevelDestinations = listOf(
     TopLevelDestination(Routes.TOUCHPAD, "Touchpad", Icons.Filled.TouchApp),
     TopLevelDestination(Routes.KVM, "KVM", Icons.Filled.Computer),
     TopLevelDestination(Routes.SCREEN, "Screen", Icons.Filled.Monitor),
+    TopLevelDestination(Routes.MIRROR, "Mirror", Icons.Filled.Cast),
+    TopLevelDestination(Routes.AUDIO, "Audio", Icons.Filled.VolumeUp),
     TopLevelDestination(Routes.DEVICES, "Devices", Icons.Filled.Smartphone),
 )
 
@@ -81,6 +89,8 @@ fun NorthbridgeRoot() {
             composable(Routes.TOUCHPAD) { TouchpadScreen() }
             composable(Routes.KVM) { KvmScreen() }
             composable(Routes.SCREEN) { ScreenScreen() }
+            composable(Routes.MIRROR) { MirrorScreen() }
+            composable(Routes.AUDIO) { AudioScreen() }
             composable(Routes.DEVICES) { DevicesScreen() }
         }
     }

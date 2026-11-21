@@ -62,9 +62,18 @@ northbridge/
 - **M3-b (planlı):** telefon→PC penceresi (iPhone-Mirroring hissi) — scrcpy
   yaklaşımı: MediaCodec H.264 encode + Shizuku(root) shell izinleri + geri
   dokunma; referans kaynak: `../scrcpy` (GPL-2 → kod kopyası yok, yaklaşım var)
-- **M4 (araştırma tamam ✓):** `docs/M4-RESEARCH.md` — pipewire-rs+cpal (masa),
-  rooted REMOTE_SUBMIX + Shizuku alternatifi (telefon), Opus 48kHz/20ms,
-  port 53320, `NBA1` 24-byte başlık; M4-a/M4-b kademeli
+- **M3-b (kod tamam ✓):** telefon→PC penceresi — Android: root `screenrecord`
+  stdout → Annex-B H.264 → `NBM1` (28B) → PC; geri gelen tık/tuş/scroll `su`
+  ile enjekte (evdev→Android tablosu, kalıcı su süreci). Masaüstü: `nb-mirror`
+  crate — openh264 decode → X11 penceresi → pencere olayları `nb.mirror`
+  olarak geri. Port 53321, scrcpy yaklaşımı (kod kopyası yok, `../scrcpy`
+  referans). E2E handshake+kare ✓; gerçek cihaz testi bekliyor.
+- **M4 (kod tamam ✓):** `docs/M4-RESEARCH.md` uygulandı — `nb-audio` crate:
+  NBA1 (24B LE) çift yönlü, port 53320, PCM garantili yol; pipewire/opus/cpal
+  yolları feature arkasında (`sudo dnf install pipewire-devel opus-devel
+  alsa-lib-devel` + `--features pipewire-cap,opus,cpal-out` ile tam aktif).
+  Android: `AudioClient` (mikrofon + root sistem-sesi, AudioTrack, MediaCodec
+  opus best-effort), MM-01 SES ekranı. E2E handshake+kare ✓
 - **M4:** ses köprüsü (cpal + Opus/UDP)
 - **M5:** Bluetooth RFCOMM transport
 

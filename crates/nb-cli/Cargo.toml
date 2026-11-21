@@ -16,6 +16,8 @@ nb-ping = { workspace = true }
 nb-clipboard = { workspace = true }
 nb-input = { workspace = true }
 nb-screen = { workspace = true }
+nb-audio = { workspace = true }
+nb-mirror = { workspace = true }
 x11rb = { workspace = true }
 tokio-rustls = { workspace = true }
 localsend = { workspace = true, features = ["discovery"] }

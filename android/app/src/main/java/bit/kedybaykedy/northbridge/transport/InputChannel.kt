@@ -270,10 +270,9 @@ class InputChannel(
                 }
                 KIND_OPEN -> Unit
                 KIND_ERROR -> Unit
-                KIND_SCREEN -> {
+                else -> {
                     _controlPackets.tryEmit(packet)
                 }
-                else -> Unit
             }
         }
     }

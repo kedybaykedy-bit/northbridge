@@ -1,0 +1,16 @@
+[package]
+name = "nb-mirror"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nb-core = { path = "../nb-core" }
+nb-transport = { path = "../nb-transport" }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+openh264 = { version = "0.9" }
+x11rb = { workspace = true }

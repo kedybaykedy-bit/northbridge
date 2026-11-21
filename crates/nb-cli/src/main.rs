@@ -15,6 +15,8 @@ use nb_core::plugin::{Plugin, PluginCtx, dispatch, plugins_for_capabilities, uni
 use nb_discovery::{discover_staged, probe_tailscale, tailscale_channels};
 use nb_ping::PingPlugin;
 use nb_screen::ScreenServer;
+use nb_audio::AudioServer;
+use nb_mirror::MirrorServer;
 use nb_transport::ls::{
     UnreachableNotices, ingest_discovery, ingest_register, start_ls,
 };
@@ -156,17 +158,69 @@ impl Plugin for ScreenPlugin {
     }
 }
 
+struct AudioPlugin {
+    server: Option<AudioServer>,
+}
+
+impl Plugin for AudioPlugin {
+    fn id(&self) -> &str {
+        nb_audio::CAP
+    }
+
+    fn incoming(&self) -> &[&str] {
+        &[nb_audio::CAP]
+    }
+
+    fn outgoing(&self) -> &[&str] {
+        &[nb_audio::CAP]
+    }
+
+    fn on_packet(&mut self, ctx: &PluginCtx, pkt: &NetworkPacket) -> Option<NetworkPacket> {
+        let server = self.server.as_ref()?;
+        let body = nb_audio::handle_control_from(server, &ctx.peer_fingerprint, &pkt.body)?;
+        Some(NetworkPacket::new(nb_audio::CAP, body))
+    }
+}
+
+struct MirrorPlugin {
+    server: Option<MirrorServer>,
+}
+
+impl Plugin for MirrorPlugin {
+    fn id(&self) -> &str {
+        nb_mirror::CAP
+    }
+
+    fn incoming(&self) -> &[&str] {
+        &[nb_mirror::CAP]
+    }
+
+    fn outgoing(&self) -> &[&str] {
+        &[nb_mirror::CAP]
+    }
+
+    fn on_packet(&mut self, ctx: &PluginCtx, pkt: &NetworkPacket) -> Option<NetworkPacket> {
+        let server = self.server.as_ref()?;
+        let body = server.handle_control_from(&ctx.peer_fingerprint, &pkt.body)?;
+        Some(NetworkPacket::new(nb_mirror::CAP, body))
+    }
+}
+
 fn make_plugins(
     clip: SharedState,
     input: Arc<Mutex<InputState>>,
     registry: InputRegistry,
     screen: Option<ScreenServer>,
+    audio: Option<AudioServer>,
+    mirror: Option<MirrorServer>,
 ) -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(PingPlugin),
         Box::new(ClipboardPlugin::new(clip)),
         Box::new(TouchpadPlugin::new(input, registry)),
         Box::new(ScreenPlugin { server: screen }),
+        Box::new(AudioPlugin { server: audio }),
+        Box::new(MirrorPlugin { server: mirror }),
     ]
 }
 
@@ -204,12 +258,17 @@ async fn cmd_listen(
     let registry = InputRegistry::new();
     let input = Arc::new(Mutex::new(InputState::with_display()));
     let screen = ScreenServer::start(identity.clone());
-    println!("[screen] frame port :{}", identity.port + 2);
+    let audio = AudioServer::start(identity.clone());
+    let mirror = MirrorServer::start(identity.clone(), registry.clone());
+    println!("[screen] frame port :{}   [audio] :{}   [mirror] :{}",
+        identity.port + 2, identity.port + 3, identity.port + 4);
     let plugins = Arc::new(Mutex::new(make_plugins(
         Arc::clone(&clip),
         Arc::clone(&input),
         registry.clone(),
         Some(screen),
+        Some(audio),
+        Some(mirror),
     )));
 
     println!("northbridge listen");
@@ -670,6 +729,8 @@ async fn cmd_pair(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
         nb_clipboard::shared_state(),
         Arc::new(Mutex::new(InputState::new())),
         InputRegistry::new(),
+        None,
+        None,
         None,
     );
     let req = NetworkPacket::new(

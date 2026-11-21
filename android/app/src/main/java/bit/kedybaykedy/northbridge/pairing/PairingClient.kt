@@ -27,8 +27,8 @@ data class PairOutcome(
 object PairingClient {
 
     private const val PROTOCOL_VERSION = "2.2"
-    private val CAPABILITY_IN = listOf("nb.kvm", "nb.screen")
-    private val CAPABILITY_OUT = listOf("nb.touchpad", "nb.screen")
+    private val CAPABILITY_IN = listOf("nb.kvm", "nb.screen", "nb.audio", "nb.mirror")
+    private val CAPABILITY_OUT = listOf("nb.touchpad", "nb.screen", "nb.audio", "nb.mirror")
 
     private val json = Json {
         ignoreUnknownKeys = true

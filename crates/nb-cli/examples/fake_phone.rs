@@ -106,8 +106,8 @@ async fn main() -> Result<()> {
             "protocol": nb_core::packet::PROTOCOL_VERSION,
             "alias": "fake-phone",
             "timestamp": nb_core::packet::now_ms(),
-            "incoming": ["nb.kvm", "nb.screen"],
-            "outgoing": ["nb.touchpad", "nb.screen"],
+            "incoming": ["nb.kvm", "nb.screen", "nb.audio", "nb.mirror"],
+            "outgoing": ["nb.touchpad", "nb.screen", "nb.audio", "nb.mirror"],
         }),
     )
     .await?;
@@ -245,6 +245,87 @@ async fn main() -> Result<()> {
     drop(fw);
     drop(fr);
 
-    println!("FAKE PHONE OK — KVM handshake + touchpad injection + screen stream verified");
+    println!("[9] audio session (nb.audio → NBA1 PCM frame)…");
+    send(&mut w, "nb.audio", json!({"t": "open", "codec": "pcm"})).await?;
+    let opened = recv_until(&mut r, Duration::from_secs(5), "audio opened", |p| {
+        p.kind == "nb.audio" && p.body.get("t").and_then(|v| v.as_str()) == Some("opened")
+    })
+    .await?;
+    let audio_port = opened.body.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    println!("  audio port {audio_port} codec {:?}",
+        opened.body.get("codec").and_then(|v| v.as_str()));
+
+    let (mut ar, mut aw) = connect(&id, host, audio_port).await?;
+    send(&mut aw, "nb.audio.open", json!({})).await?;
+    recv_until(&mut ar, Duration::from_secs(5), "audio ack", |p| {
+        p.kind == "nb.audio.open"
+            && p.body.get("ok").and_then(|v| v.as_bool()) == Some(true)
+    })
+    .await?;
+    let mut audio = b"NBA1".to_vec();
+    audio.push(1);
+    audio.push(1);
+    audio.push(0x02);
+    audio.push(2);
+    audio.extend_from_slice(&0u32.to_le_bytes());
+    audio.extend_from_slice(&0u64.to_le_bytes());
+    audio.extend_from_slice(&3840u32.to_le_bytes());
+    audio.extend_from_slice(&[0u8; 3840]);
+    AsyncWriteExt::write_all(&mut aw, &audio).await?;
+    println!("  sent 1×3840B silence frame (phone→desk)");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    send(&mut w, "nb.audio", json!({"t": "release"})).await?;
+    recv_until(&mut r, Duration::from_secs(5), "audio closed", |p| {
+        p.kind == "nb.audio" && p.body.get("t").and_then(|v| v.as_str()) == Some("closed")
+    })
+    .await?;
+    drop(aw);
+    drop(ar);
+
+    println!("[10] mirror session (nb.mirror → NBM1 frame)…");
+    send(
+        &mut w,
+        "nb.mirror",
+        json!({"t": "open", "fps": 30, "max_w": 1080}),
+    )
+    .await?;
+    let opened = recv_until(&mut r, Duration::from_secs(5), "mirror opened", |p| {
+        p.kind == "nb.mirror" && p.body.get("t").and_then(|v| v.as_str()) == Some("opened")
+    })
+    .await?;
+    let mirror_port = opened.body.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    println!("  mirror port {mirror_port}");
+
+    let (mut mr, mut mw) = connect(&id, host, mirror_port).await?;
+    send(&mut mw, "nb.mirror.frame.open", json!({})).await?;
+    recv_until(&mut mr, Duration::from_secs(5), "mirror frame ack", |p| {
+        p.kind == "nb.mirror.frame.open"
+            && p.body.get("ok").and_then(|v| v.as_bool()) == Some(true)
+    })
+    .await?;
+    let mut mirror = b"NBM1".to_vec();
+    mirror.push(1);
+    mirror.push(1);
+    mirror.extend_from_slice(&0u16.to_be_bytes());
+    mirror.extend_from_slice(&0u32.to_be_bytes());
+    mirror.extend_from_slice(&0u64.to_be_bytes());
+    mirror.extend_from_slice(&1080u16.to_be_bytes());
+    mirror.extend_from_slice(&1920u16.to_be_bytes());
+    mirror.extend_from_slice(&4u32.to_be_bytes());
+    mirror.extend_from_slice(&[0u8; 4]);
+    AsyncWriteExt::write_all(&mut mw, &mirror).await?;
+    println!("  sent 1×NBM1 frame (junk payload tolerated by decoder)");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    send(&mut w, "nb.mirror", json!({"t": "release"})).await?;
+    recv_until(&mut r, Duration::from_secs(5), "mirror closed", |p| {
+        p.kind == "nb.mirror" && p.body.get("t").and_then(|v| v.as_str()) == Some("closed")
+    })
+    .await?;
+    drop(mw);
+    drop(mr);
+
+    println!("FAKE PHONE OK — KVM + touchpad + screen + audio + mirror verified");
     Ok(())
 }
