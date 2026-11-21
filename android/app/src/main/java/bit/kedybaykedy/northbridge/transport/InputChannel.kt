@@ -89,6 +89,8 @@ class InputChannel(
 
     @Volatile
     private var lastActivityAt = 0L
+    private var kvmRecvCount = 0
+    private var rxCount = 0
 
     fun attach(target: TrustedDevice?) {
         if (target != null && target == attached && connectionJob?.isActive == true) {
@@ -316,6 +318,10 @@ class InputChannel(
             }
             lastActivityAt = System.currentTimeMillis()
             val packet = parsePacket(line) ?: continue
+            rxCount++
+            if (rxCount <= 12 || rxCount % 200 == 0) {
+                Log.d("northbridge", "rx ${packet.kind} #$rxCount")
+            }
             when (packet.kind) {
                 KIND_KVM -> {
                     val msg = decodeBody(packet.body) ?: continue
@@ -327,6 +333,10 @@ class InputChannel(
                     val t = (body["t"] as? JsonPrimitive)?.takeIf { it.isString }?.content
                     if (t in KVM_BODY_TYPES) {
                         _kvmBodies.tryEmit(body)
+                        kvmRecvCount++
+                        if (kvmRecvCount <= 5 || kvmRecvCount % 200 == 0) {
+                            Log.d("northbridge", "kvm recv $t #$kvmRecvCount")
+                        }
                     }
                 }
                 KIND_TOUCHPAD -> {

@@ -55,6 +55,13 @@ KDE Connect baz değil; ../scrcpy salt referans (GPL-2, kod kopyası YOK). Kod y
    Sahip: crates/nb-screen/**, ui/screen/**, transport/ScreenClient.kt.
 
 ## 6. SIRADAKİ İŞLER
+- **YENİ İSTEKLER (kullanıcı, not al — sonra ekle):**
+  (a) **Batarya paylaşımı**: iki cihaz birbirinin batarya yüzdesini görsün (telefon→PC
+      bildirim/satır + PC GUI'de gösterim; PC→telefon da mümkün — keşif duyurusuna veya
+      hafif bir `nb.battery` paketine eklenebilir, periyodik ~60sn).
+  (b) **Bildirim yansıtma**: telefonda gelen bildirimler PC'de görünsün (KDE Connect gibi)
+      — Android NotificationListenerService (izin verilmesi gerekir) + `nb.notify` paketi +
+      PC'de GUI/masaüstü gösterimi (kapat/sil eylemleri sonra).
 - **KVM EKRANINDAKİ SANAL PENCERE/İMLEÇ HÂLÂ DURUYOR** (kullanıcı: "hala KVM penceresinde
   sanal pencere var") → o ekran R-C'den etkilenmedi; CursorRenderer kaldırılıp gerçek imleç
   KVM yoluna da taşınacak. Dosyalar: ui/KvmScreen.kt, ui/KvmViewModel.kt, input/CursorRenderer.kt.

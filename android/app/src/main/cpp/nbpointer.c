@@ -8,6 +8,10 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#ifndef INPUT_PROP_POINTER
+#define INPUT_PROP_POINTER 0
+#endif
+
 static int pointer_fd = -1;
 
 int nbpointer_move_rel(int dx, int dy);
@@ -84,6 +88,7 @@ int nbpointer_create(void) {
     if (ok == 0 && ioctl(fd, UI_SET_RELBIT, REL_X) < 0) ok = -1;
     if (ok == 0 && ioctl(fd, UI_SET_RELBIT, REL_Y) < 0) ok = -1;
     if (ok == 0 && ioctl(fd, UI_SET_RELBIT, REL_WHEEL) < 0) ok = -1;
+    ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_POINTER);
     if (ok == 0) {
         struct uinput_setup setup;
         memset(&setup, 0, sizeof(setup));

@@ -181,6 +181,10 @@ async fn serve_stream(
     write_half: tokio::io::WriteHalf<ServerTls>,
 ) -> Result<()> {
     let (conn_id, tx, rx) = registry.open(peer_fp);
+    eprintln!(
+        "[input] stream open {} conn={conn_id} from {remote}",
+        &peer_fp[..12.min(peer_fp.len())]
+    );
     let writer = tokio::spawn(writer_loop(rx, write_half));
 
     let run = async {

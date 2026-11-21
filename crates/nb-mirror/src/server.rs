@@ -742,6 +742,8 @@ fn kvm_loop(server: MirrorServer, mut grab: KvmGrab, peer_fp: String, generation
     let (w, h) = grab.screen_size();
     let mut held = KvmHeld::new();
     let mut last_move = Instant::now() - MOTION_THROTTLE;
+    let mut motion_n = 0u32;
+    let mut motion_t = Instant::now();
     loop {
         if !server.kvm_matches(generation, &peer_fp) {
             break;
@@ -767,6 +769,12 @@ fn kvm_loop(server: MirrorServer, mut grab: KvmGrab, peer_fp: String, generation
                     continue;
                 }
                 last_move = Instant::now();
+                motion_n += 1;
+                if motion_t.elapsed() >= Duration::from_secs(1) {
+                    eprintln!("[kvm] fwd {motion_n} motion/s");
+                    motion_n = 0;
+                    motion_t = Instant::now();
+                }
                 let nx = normalize_coord(f64::from(ev.root_x), f64::from(w));
                 let ny = normalize_coord(f64::from(ev.root_y), f64::from(h));
                 if !kvm_send(&server, &peer_fp, move_packet(nx, ny)) {

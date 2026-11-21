@@ -1,5 +1,7 @@
 package bit.kedybaykedy.northbridge.input
 
+import android.util.Log
+
 import android.content.ComponentName
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
@@ -210,7 +212,11 @@ object NativePointer {
     }
 
     fun moveAbs(nx: Double, ny: Double, w: Int, h: Int) {
-        val link = synchronized(lock) { backend } ?: return
+        val link = synchronized(lock) { backend }
+        if (link == null) {
+            dropLog("move dropped (no backend)")
+            return
+        }
         if (w <= 0 || h <= 0) {
             return
         }
@@ -285,12 +291,24 @@ object NativePointer {
 
     private fun setStatus(text: String) {
         _status.value = text
+        Log.d("northbridge", "pointer: $text")
+    }
+
+    private var lastDropLogAt = 0L
+
+    private fun dropLog(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastDropLogAt > 1000) {
+            lastDropLogAt = now
+            Log.w("northbridge", "pointer $reason")
+        }
     }
 
     private fun startRoot(): Boolean {
         if (!rootAvailable()) {
             return false
         }
+        killStaleDaemons()
         dropStaleSock()
         val context = try {
             AppGraph.appContext
@@ -512,6 +530,13 @@ object NativePointer {
 
     private fun closeQuiet(proc: Process) {        try {
             proc.destroy()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun killStaleDaemons() {
+        try {
+            ProcessBuilder("su", "-c", "pkill -f PointerDaemon").start().waitFor()
         } catch (_: Exception) {
         }
     }

@@ -94,8 +94,10 @@ impl ClientCertVerifier for AcceptAnyClientCert {
         _: &[CertificateDer<'_>],
         _: UnixTime,
     ) -> Result<ClientCertVerified, TlsError> {
-        verify_cert_from_der(cert.as_ref(), None)
-            .map_err(|e| other_err(format!("client certificate invalid: {e:#}")))?;
+        if let Err(e) = verify_cert_from_der(cert.as_ref(), None) {
+            eprintln!("[tls] client certificate rejected: {e:#}");
+            return Err(other_err(format!("client certificate invalid: {e:#}")));
+        }
         Ok(ClientCertVerified::assertion())
     }
 
