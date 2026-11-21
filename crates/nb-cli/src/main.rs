@@ -1063,6 +1063,11 @@ async fn cmd_control_open(cfg: &Option<PathBuf>, target: &str, package: &str) ->
         yesno(body, "awake"),
         yesno(body, "keyguard")
     );
+    if let Some(note) = body.get("note").and_then(|v| v.as_str()) {
+        println!("note: {note}");
+    } else if body.get("secure").and_then(|v| v.as_bool()) == Some(true) {
+        println!("note: secure lock active — unlock on the phone");
+    }
     Ok(())
 }
 

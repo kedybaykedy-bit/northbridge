@@ -243,19 +243,21 @@ object PacketServer {
 
     private fun shQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
-    private data class PowerState(val awake: Boolean, val keyguard: Boolean, val keyguardExists: Boolean)
+    private data class PowerState(val awake: Boolean, val keyguard: Boolean, val keyguardExists: Boolean, val keyguardSecure: Boolean)
 
     private fun readPowerState(): PowerState {
-        val r = runSu("dumpsys power | grep mWakefulness=; dumpsys window | grep -E 'isKeyguardShowing=|deviceHasKeyguard='")
+        val r = runSu("dumpsys power | grep mWakefulness=; dumpsys window | grep -E 'isKeyguardShowing=|deviceHasKeyguard='; dumpsys window | grep -A8 'KeyguardServiceDelegate' | grep -E 'secure=|showing='")
         var awake = false
         var keyguard = false
         var exists = false
+        var secure = false
         for (line in r.out.lines()) {
             if (line.contains("mWakefulness=Awake")) awake = true
             if (line.contains("isKeyguardShowing=true")) keyguard = true
             if (line.contains("deviceHasKeyguard=true")) exists = true
+            if (line.trim() == "secure=true") secure = true
         }
-        return PowerState(awake, keyguard, exists)
+        return PowerState(awake, keyguard, exists, keyguard && secure)
     }
 
     private fun controlError(now: Long, action: String, reason: String): NetworkPacket {
@@ -326,6 +328,9 @@ object PacketServer {
                 put("keyguard", st.keyguard)
                 if (!st.awake) {
                     put("error", "display did not wake")
+                } else if (st.keyguard && st.keyguardSecure) {
+                    put("secure", true)
+                    put("note", "secure lock active; unlock on the phone to proceed")
                 } else if (st.keyguard) {
                     put("note", "keyguard still showing; unlock on the phone to proceed")
                 }
@@ -405,24 +410,33 @@ object PacketServer {
                 }
                 put("awake", st.awake)
                 put("keyguard", st.keyguard)
+                if (st.keyguard && st.keyguardSecure) put("secure", true)
             },
         )
     }
 
-    private fun doKeepAwake(now: Long, on: Boolean): NetworkPacket {
+    fun setKeepAwake(on: Boolean): Boolean {
+        return try {
+            applyKeepAwake(on).ok
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private data class KeepAwakeResult(
+        val ok: Boolean,
+        val on: Boolean,
+        val already: Boolean = false,
+        val prevStayon: String = "",
+        val prevTimeout: String = "",
+        val awake: Boolean = false,
+    )
+
+    private fun applyKeepAwake(on: Boolean): KeepAwakeResult {
         val prefs = AppGraph.prefs
         if (on) {
             if (prefs.getBoolean(PREF_KEEP, false)) {
-                return NetworkPacket(
-                    id = now,
-                    kind = KIND_CONTROL,
-                    body = buildJsonObject {
-                        put("ok", true)
-                        put("action", "keepawake")
-                        put("on", true)
-                        put("note", "already on")
-                    },
-                )
+                return KeepAwakeResult(ok = true, on = true, already = true)
             }
             val prevStayon = runSu("settings get global stay_on_while_plugged_in").out.lines().firstOrNull().orEmpty().trim()
             val prevTimeout = runSu("settings get system screen_off_timeout").out.lines().firstOrNull().orEmpty().trim()
@@ -436,17 +450,12 @@ object PacketServer {
             wakeAndDismiss()
             val st = readPowerState()
             Log.d("northbridge", "control keepawake on prev_stayon=$prevStayon prev_timeout=$prevTimeout")
-            return NetworkPacket(
-                id = now,
-                kind = KIND_CONTROL,
-                body = buildJsonObject {
-                    put("ok", true)
-                    put("action", "keepawake")
-                    put("on", true)
-                    put("prev_stayon", prevStayon)
-                    put("prev_timeout", prevTimeout)
-                    put("awake", st.awake)
-                },
+            return KeepAwakeResult(
+                ok = true,
+                on = true,
+                prevStayon = prevStayon,
+                prevTimeout = prevTimeout,
+                awake = st.awake,
             )
         }
         val prevStayon = prefs.getString(PREF_STAYON, null)
@@ -459,13 +468,22 @@ object PacketServer {
         }
         prefs.edit().putBoolean(PREF_KEEP, false).remove(PREF_STAYON).remove(PREF_TIMEOUT).apply()
         Log.d("northbridge", "control keepawake off restored stayon=$prevStayon timeout=$prevTimeout")
+        return KeepAwakeResult(ok = true, on = false)
+    }
+
+    private fun doKeepAwake(now: Long, on: Boolean): NetworkPacket {
+        val r = applyKeepAwake(on)
         return NetworkPacket(
             id = now,
             kind = KIND_CONTROL,
             body = buildJsonObject {
-                put("ok", true)
+                put("ok", r.ok)
                 put("action", "keepawake")
-                put("on", false)
+                put("on", r.on)
+                if (r.already) put("note", "already on")
+                if (r.on && r.prevStayon.isNotEmpty()) put("prev_stayon", r.prevStayon)
+                if (r.on && r.prevTimeout.isNotEmpty()) put("prev_timeout", r.prevTimeout)
+                if (r.on) put("awake", r.awake)
             },
         )
     }

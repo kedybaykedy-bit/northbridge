@@ -55,11 +55,13 @@ KDE Connect baz değil; ../scrcpy salt referans (GPL-2, kod kopyası YOK). Kod y
    Sahip: crates/nb-screen/**, ui/screen/**, transport/ScreenClient.kt.
 
 ## 6. SIRADAKİ İŞLER
-- **R-C NATIVE FARE** (kullanıcı onayladı): PC'den telefonu kontrol ederken telefonda **gerçek
-  fare imleci** görünsün (OTG takılıymış gibi, Barrier gibi). **Ana yol: root + /dev/uinput**
-  (uinput cihazı oluştur → Android gerçek imleç çizer). **Alternatif: Shizuku** (rootsuz —
-  Shizuku telefonda kurulu değil, kullanıcı kuracak; shell'in uhid grubuna bakılacak).
-  NDK hazır → JNI/C yardımcısı mümkün. **Ayna agent'i MirrorInjector'u bırakınca SAL** (çakışır).
+- **KVM EKRANINDAKİ SANAL PENCERE/İMLEÇ HÂLÂ DURUYOR** (kullanıcı: "hala KVM penceresinde
+  sanal pencere var") → o ekran R-C'den etkilenmedi; CursorRenderer kaldırılıp gerçek imleç
+  KVM yoluna da taşınacak. Dosyalar: ui/KvmScreen.kt, ui/KvmViewModel.kt, input/CursorRenderer.kt.
+- **R-C çıktı ama kullanıcı: "istediğim tam olarak böyle değildi"** (acelesi yok) → ne
+  beklediğini NETLEŞTİR. Muhtemel fark: imlecin göründüğü yer/mod veya tıklama davranışı.
+  Değişiklik ayna + KVM yolunu birlikte etkileyecek; R-C dosyaları: input/NativePointer.kt,
+  input/PointerDaemon.kt, input/PointerUserService.kt, android/app/src/main/cpp/, MirrorInjector.
 - **R-E çoklu cihaz**:2 PC ↔2 telefon (adres altyapısı artık hazır).
 - **R-F fps**: SHM PutImage denemesi (15fps kullanıcının hoşuna gidiyor, zorunlu değil).
 - **Not (kullanıcı)**: ek monitör seçimi — sonra.
