@@ -82,3 +82,35 @@ northbridge/
 İki makinede `northbridge listen` → birbirini LAN **ve** Tailscale üzerinden bulur,
 `pair` ile eşleşir (fingerprint trust store'a yazılır, kanal etiketli),
 `ping` çalışır, USB tethering takılınca aynı cihaz "tanıdık" kanal etiketiyle görünür.
+
+## Gerçek cihaz testi (2026-11-21, Redmi Note 10 Pro / LineageOS)
+
+Geçen: keşif (multicast 224.0.0.167), eşleşme (PIN 6567 → ACCEPTED), touchpad +
+klavye, KVM yakala/bırak, PC→telefon ekran akışı, mikrofon→hoparlör ses,
+**AYNA** (root `screenrecord` → NBM1 → openh264 → X11 pencere + geri tık).
+Root yolu `su` ile çalışıyor; sistem-sesi kaynağı (REMOTE_SUBMIX) hâlâ bekliyor.
+
+Cihazda bulunan ve çözülen hatalar:
+- Android BC imzası (provider adı çakışması) → uygulama açılışta çöküyordu.
+- `MulticastSocket()` no-arg zaten bağlı → `bind` "already bound" → keşif yok.
+- `NEARBY_WIFI_DEVICES` izni yoktu (Android 13+ multicast).
+- mTLS: sunucu CA-hint'e göre alias elemesi yapıp boş sertifika gönderiyordu →
+  issuer-blind key manager (tüm mTLS kanalları tek noktadan düzeldi).
+- `create_gc(window, gc)` tersti (x11rb'de ilk param GC) → X11 IDChoice.
+- AU flush kuralı "VCL sonrası SPS/PPS" bekliyordu → bu cihazda hiç flush
+  yoktu (2MB okunmuş,0 kare) → her yeni görüntüde (`first_mb=0`) flush.
+- Frame kopunca kör retry → her hata döngüsünde kontrol yeniden açılıyor.
+- **Donma (Native:18 = dsNoParamSets|dsRefLost):** kuyruk `take_newest` kare
+  atlayınca referanslar kopuyordu (offline deney:1 atlansa27 kare hata) →
+  FIFO tam boşaltma + kuyruk2→64 (PC ve telefon) — `decode_sim` örneği
+  kanıt olarak repo'da.
+
+Bekleyen hatalar / geliştirmeler:
+- **BUG-1:** Discover'da eşleşmiş cihazda hâlâ `Pair` yazıyor, tekrar
+  pair'lenebiliyor → paired durumu gösterilmeli, tekrar pair engellenmeli.
+- Uygulamadan çıkınca ayna kapanıyor + kayıtta ekran timeout'u düşüyor →
+  `FLAG_KEEP_SCREEN_ON` eklendi (app ön planda); kalıcı çözüm foreground
+  service (M3-c/arka plan işi).
+- Ekran (screen) akışı kare düşürüyor/donuyor → adaptif ölçek + FPS/latency.
+- AYNA meta satırı "yanıt bekliyor" yazabiliyorken canlı (kozmetik).
+- Keşif döngüsü `listen`'de 60 sn (`STAGE_INTERVAL`) → kısaltılabilir.

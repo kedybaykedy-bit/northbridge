@@ -27,8 +27,11 @@ impl H264Decoder {
         let yuv = match self.inner.decode(annexb) {
             Ok(Some(yuv)) => yuv,
             Ok(None) => return None,
-            Err(_) => {
+            Err(e) => {
                 self.errors += 1;
+                if self.errors <= 5 || self.errors % 120 == 0 {
+                    eprintln!("[mirror] decode error: {e}");
+                }
                 return None;
             }
         };

@@ -201,8 +201,14 @@ impl Plugin for MirrorPlugin {
 
     fn on_packet(&mut self, ctx: &PluginCtx, pkt: &NetworkPacket) -> Option<NetworkPacket> {
         let server = self.server.as_ref()?;
-        let body = server.handle_control_from(&ctx.peer_fingerprint, &pkt.body)?;
-        Some(NetworkPacket::new(nb_mirror::CAP, body))
+        let reply = server.handle_control_from(&ctx.peer_fingerprint, &pkt.body);
+        eprintln!(
+            "[mirror] control from {} body={} reply={}",
+            &ctx.peer_fingerprint[..12.min(ctx.peer_fingerprint.len())],
+            pkt.body,
+            reply.is_some(),
+        );
+        reply.map(|body| NetworkPacket::new(nb_mirror::CAP, body))
     }
 }
 

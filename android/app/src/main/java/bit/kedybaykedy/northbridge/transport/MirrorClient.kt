@@ -1,6 +1,7 @@
 package bit.kedybaykedy.northbridge.transport
 
 import android.content.res.Resources
+import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.IOException
@@ -95,15 +96,18 @@ class ScreenrecordSource(
         val proc = ProcessBuilder("su", "-c", cmd)
             .redirectErrorStream(true)
             .start()
+        Log.d("northbridge", "screenrecord started: $cmd")
         try {
             MirrorProcs.track(proc)
             parseAnnexB(proc.inputStream) { unit ->
                 output.trySend(unit)
             }
-            try {
+            val code = try {
                 proc.waitFor()
             } catch (_: Exception) {
+                -1
             }
+            Log.d("northbridge", "screenrecord exited code=$code")
         } finally {
             MirrorProcs.untrack(proc)
             try {
@@ -143,6 +147,9 @@ private object MirrorProcs {
 
 private val AnnexBStart4 = byteArrayOf(0, 0, 0, 1)
 
+private fun isFirstSliceOfPicture(nal: ByteArray): Boolean =
+    nal.size > 1 && (nal[1].toInt() and 0x80) != 0
+
 private fun parseAnnexB(stream: InputStream, emit: (ByteArray) -> Unit) {
     val pending = ByteArrayOutputStream(65536)
     var hasVcl = false
@@ -156,13 +163,19 @@ private fun parseAnnexB(stream: InputStream, emit: (ByteArray) -> Unit) {
     fun handleNal(nal: ByteArray) {
         if (nal.isEmpty()) return
         val nalType = nal[0].toInt() and 0x1F
-        if ((nalType == 6 || nalType == 7 || nalType == 8 || nalType == 9) && hasVcl) {
-            flush()
-        }
-        pending.write(AnnexBStart4)
-        pending.write(nal)
         if (nalType == 1 || nalType == 5) {
+            if (hasVcl && isFirstSliceOfPicture(nal)) {
+                flush()
+            }
+            pending.write(AnnexBStart4)
+            pending.write(nal)
             hasVcl = true
+        } else {
+            if ((nalType == 6 || nalType == 7 || nalType == 8 || nalType == 9) && hasVcl) {
+                flush()
+            }
+            pending.write(AnnexBStart4)
+            pending.write(nal)
         }
     }
     val carry = ByteArrayOutputStream(65536)
@@ -334,6 +347,7 @@ class MirrorClient(
     private fun route(packet: NetworkPacket) {
         if (packet.kind != KIND_MIRROR) return
         val body = packet.body as? JsonObject ?: return
+        Log.d("northbridge", "mirror route: $body")
         when ((body["t"] as? JsonPrimitive)?.content) {
             "opened" -> {
                 val open = pendingOpen
@@ -363,7 +377,6 @@ class MirrorClient(
     private suspend fun runSession(host: String, packetPort: Int, fingerprint: String, fps: Int, maxW: Int) {
         _state.value = MirrorLinkState.Opening
         try {
-            val framePort = openControl(fps, maxW)
             val size = scaledSize(maxW)
             _videoSize.value = size
             val source = ScreenrecordSource(size.first, size.second)
@@ -377,15 +390,28 @@ class MirrorClient(
                     var attempt = 0
                     while (true) {
                         coroutineContext.ensureActive()
+                        _state.value = MirrorLinkState.Opening
+                        val framePort = try {
+                            openControl(fps, maxW)
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
+                        } catch (e: Exception) {
+                            attempt++
+                            if (attempt > 8) throw e
+                            Log.e("northbridge", "mirror reopen attempt $attempt failed", e)
+                            delay((500L shl attempt.coerceAtMost(4)).coerceAtMost(8000L))
+                            continue
+                        }
+                        attempt = 0
                         try {
                             withContext(Dispatchers.IO) {
                                 runFrameSession(host, framePort, fingerprint, queue, size.first, size.second)
                             }
-                            attempt = 0
                         } catch (cancellation: CancellationException) {
                             throw cancellation
-                        } catch (_: Exception) {
+                        } catch (e: Exception) {
                             coroutineContext.ensureActive()
+                            Log.w("northbridge", "mirror frame session dropped — reopening control", e)
                         }
                         val backoff = (500L shl attempt.coerceAtMost(4)).coerceAtMost(8000L)
                         attempt++
@@ -412,14 +438,20 @@ class MirrorClient(
         pendingOpen = done
         try {
             val sent = channel.sendPacket(KIND_MIRROR, openBody(fps, maxW))
+            Log.d("northbridge", "mirror open sent=$sent")
             if (!sent) {
                 throw IOException("mirror: control channel not connected")
             }
-            val port = withTimeout(CONTROL_TIMEOUT_MS) { done.await() }
-                ?: throw IOException("mirror: desktop refused the session")
+            val port = try {
+                withTimeout(CONTROL_TIMEOUT_MS) { done.await() }
+            } catch (e: Exception) {
+                Log.e("northbridge", "mirror open wait failed", e)
+                throw e
+            } ?: throw IOException("mirror: desktop refused the session")
             if (port !in 1..65535) {
                 throw IOException("mirror: bad frame port")
             }
+            Log.d("northbridge", "mirror opened port=$port")
             return port
         } finally {
             pendingOpen = null
@@ -604,7 +636,7 @@ class MirrorClient(
         const val VERSION: Byte = 1
         const val CODEC_H264: Byte = 1
         const val FLAGS: Short = 0
-        const val QUEUE_SLOTS = 2
+        const val QUEUE_SLOTS = 64
         const val MAX_UNIT_BYTES = 8 * 1024 * 1024
         const val CONNECT_TIMEOUT_MS = 10000
         const val OPEN_TIMEOUT_MS = 10000

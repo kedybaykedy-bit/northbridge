@@ -22,7 +22,7 @@ use crate::events::{
 use crate::frame::{self, FrameMeta};
 
 pub const MAX_LINE: usize = 65536;
-pub const FRAME_QUEUE_CAP: usize = 2;
+pub const FRAME_QUEUE_CAP: usize = 64;
 pub const MOTION_THROTTLE: Duration = Duration::from_millis(16);
 
 struct SessionState {
@@ -55,11 +55,8 @@ impl FrameSlot {
         self.frames.push_back(frame);
     }
 
-    fn take_newest(&mut self) -> Option<RawFrame> {
-        while self.frames.len() > 1 {
-            self.frames.pop_front();
-        }
-        self.frames.pop_front()
+    fn drain(&mut self) -> Vec<RawFrame> {
+        self.frames.drain(..).collect()
     }
 }
 
@@ -127,6 +124,11 @@ impl MirrorServer {
         };
         session.fps = if fps == 0 { DEFAULT_FPS } else { fps.clamp(1, 30) };
         session.generation = session.generation.wrapping_add(1);
+        eprintln!(
+            "[mirror] session open {} gen {}",
+            &peer_fp[..12.min(peer_fp.len())],
+            session.generation
+        );
         self.inner.frame_port
     }
 
@@ -135,6 +137,7 @@ impl MirrorServer {
         if session.peer_fp.as_deref() == Some(peer_fp) {
             session.peer_fp = None;
             session.generation = session.generation.wrapping_add(1);
+            eprintln!("[mirror] release {}", &peer_fp[..12.min(peer_fp.len())]);
         }
     }
 
@@ -143,6 +146,10 @@ impl MirrorServer {
         if session.generation == generation && session.peer_fp.as_deref() == Some(peer_fp) {
             session.peer_fp = None;
             session.generation = session.generation.wrapping_add(1);
+            eprintln!(
+                "[mirror] frame eof -> idle {} (gen {generation})",
+                &peer_fp[..12.min(peer_fp.len())]
+            );
         }
     }
 
@@ -388,7 +395,7 @@ fn ui_loop(
         Err(e) => {
             eprintln!("[mirror] no X display: {e:#}");
             while server.matches(generation, &peer_fp) {
-                queue.lock().unwrap().take_newest();
+                queue.lock().unwrap().drain();
                 std::thread::sleep(Duration::from_millis(20));
             }
             return;
@@ -409,26 +416,53 @@ fn ui_loop(
         pressed: HashSet::new(),
         last_motion: None,
     };
+    let mut shown = 0u64;
+    let mut waits = 0u64;
+    let mut frames_logged = 0u32;
     loop {
         if !server.matches(generation, &peer_fp) {
+            eprintln!("[mirror] ui thread end (gen {generation} replaced)");
             break;
         }
-        if let Some(raw) = queue.lock().unwrap().take_newest() {
-            let _ = raw.meta.flags;
-            if let Some(decoder) = decoder.as_mut() {
-                match decoder.decode(&raw.payload) {
-                    Some(frame) => {
-                        if let Err(e) = window.show_frame(&frame.bgra, frame.width, frame.height) {
-                            eprintln!("[mirror] show frame: {e:#}");
-                        } else {
-                            cached = Some((frame.width, frame.height, frame.bgra));
+        let batch = queue.lock().unwrap().drain();
+        if batch.is_empty() {
+            std::thread::sleep(Duration::from_millis(4));
+        } else {
+            let mut latest: Option<(Vec<u8>, u16, u16)> = None;
+            for raw in batch {
+                if frames_logged < 3 {
+                    frames_logged += 1;
+                    eprintln!("[mirror] frame seq={} len={}", raw.meta.seq, raw.payload.len());
+                }
+                if let Some(decoder) = decoder.as_mut() {
+                    match decoder.decode(&raw.payload) {
+                        Some(frame) => {
+                            shown += 1;
+                            let (w, h) = (frame.width, frame.height);
+                            if shown <= 3 || shown % 60 == 0 {
+                                eprintln!("[mirror] shown x{shown} {w}x{h}");
+                            }
+                            latest = Some((frame.bgra, w, h));
+                        }
+                        None => {
+                            waits += 1;
+                            if waits <= 5 || waits % 60 == 0 {
+                                eprintln!(
+                                    "[mirror] decode none x{waits} (decoded={} errors={})",
+                                    decoder.decoded, decoder.errors
+                                );
+                            }
                         }
                     }
-                    None => {}
                 }
             }
-        } else {
-            std::thread::sleep(Duration::from_millis(4));
+            if let Some((bgra, w, h)) = latest {
+                if let Err(e) = window.show_frame(&bgra, w, h) {
+                    eprintln!("[mirror] show frame: {e:#}");
+                } else {
+                    cached = Some((w, h, bgra));
+                }
+            }
         }
         drain_events(&mut window, &mut fwd, &mut cached);
     }

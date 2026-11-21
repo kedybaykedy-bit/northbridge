@@ -56,7 +56,7 @@ impl MirrorWindow {
         .check()
         .context("create window check")?;
         let gc: u32 = conn.generate_id().context("gc id")?;
-        conn.create_gc(window, gc, &CreateGCAux::new())
+        conn.create_gc(gc, window, &CreateGCAux::new())
             .context("create gc")?
             .check()
             .context("create gc check")?;
