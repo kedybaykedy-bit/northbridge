@@ -15,7 +15,7 @@ use x11rb::protocol::xproto::KeyButMask;
 
 use crate::control::{CAP, DEFAULT_FPS, DEFAULT_MAX_W, FRAME_OPEN_KIND};
 use crate::decode::H264Decoder;
-use crate::display::MirrorWindow;
+use crate::display::{MirrorWindow, is_connection_dead};
 use crate::events::{
     KeyAction, button_name, key_action, normalize_coord, scroll_delta, xkey_to_evdev,
 };
@@ -533,6 +533,13 @@ fn ui_loop(
             if let Some((bgra, w, h)) = latest {
                 if last_show.elapsed() >= Duration::from_millis(25) {
                     if let Err(e) = window.show_frame(&bgra, w, h) {
+                        if is_connection_dead(&e) {
+                            eprintln!(
+                                "[mirror] X connection lost ({e:#}) — closing window (gen {generation})"
+                            );
+                            server.close_generation(&peer_fp, generation);
+                            break;
+                        }
                         eprintln!("[mirror] show frame: {e:#}");
                     } else {
                         cached = Some((w, h, bgra));
@@ -541,14 +548,22 @@ fn ui_loop(
                 }
             }
         }
-        drain_events(&mut window, &mut fwd, &mut cached);
+        if !drain_events(&mut window, &mut fwd, &mut cached) {
+            eprintln!("[mirror] X connection lost (event poll) — closing window (gen {generation})");
+            server.close_generation(&peer_fp, generation);
+            break;
+        }
         if t1s.elapsed() >= Duration::from_secs(1) {
             let depth = queue.lock().unwrap().len();
             let title = format!(
                 "Northbridge — mirror · {} fps · {} ms · q{}",
                 shown_1s, last_lat, depth
             );
-            window.set_title(title.as_bytes());
+            if !window.set_title(title.as_bytes()) {
+                eprintln!("[mirror] X connection lost (title) — closing window (gen {generation})");
+                server.close_generation(&peer_fp, generation);
+                break;
+            }
             if shown_1s > 0 || t1s.elapsed() >= Duration::from_secs(5) {
                 eprintln!("[mirror] fps={shown_1s} lat={last_lat}ms depth={depth}");
             }
@@ -587,13 +602,16 @@ fn drain_events(
     window: &mut MirrorWindow,
     fwd: &mut UiForwarder<'_>,
     cached: &mut Option<(u16, u16, Vec<u8>)>,
-) {
+) -> bool {
     loop {
         let event = match window.poll_event() {
             Ok(event) => event,
             Err(e) => {
+                if is_connection_dead(&e) {
+                    return false;
+                }
                 eprintln!("[mirror] poll event: {e:#}");
-                return;
+                return true;
             }
         };
         let Some(event) = event else { break };
@@ -674,12 +692,17 @@ fn drain_events(
             }
             Event::Expose(_) => {
                 if let Some((w, h, bgra)) = cached.as_ref() {
-                    let _ = window.show_frame(bgra, *w, *h);
+                    if let Err(e) = window.show_frame(bgra, *w, *h) {
+                        if is_connection_dead(&e) {
+                            return false;
+                        }
+                    }
                 }
             }
             _ => {}
         }
     }
+    true
 }
 
 fn primary_keysym(window: &mut MirrorWindow, keycode: u8, state: KeyButMask) -> Option<u32> {
@@ -729,5 +752,30 @@ mod tests {
         assert!(srv.is_open());
         srv.close("PEER-B");
         assert!(!srv.is_open());
+    }
+
+    #[test]
+    fn close_generation_clears_once_and_reopens() {
+        let id = Identity {
+            alias: "test".into(),
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            fingerprint: "TEST".into(),
+            port: 45800 + (std::process::id() as u16 % 200),
+        };
+        let srv = MirrorServer::start(id, InputRegistry::new());
+        srv.open("PEER-X", 1080, 20);
+        let gen = srv.inner.session.lock().unwrap().generation;
+        assert!(srv.matches(gen, "PEER-X"));
+        srv.close_generation("PEER-X", gen);
+        assert!(!srv.is_open());
+        let bumped = srv.inner.session.lock().unwrap().generation;
+        assert_eq!(bumped, gen.wrapping_add(1));
+        srv.close_generation("PEER-X", gen);
+        assert_eq!(srv.inner.session.lock().unwrap().generation, bumped);
+        srv.open("PEER-Y", 640, 10);
+        assert!(srv.is_open());
+        assert_eq!(srv.session_peer().as_deref(), Some("PEER-Y"));
+        assert!(srv.inner.session.lock().unwrap().generation > bumped);
     }
 }

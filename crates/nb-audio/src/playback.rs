@@ -52,21 +52,26 @@ impl CpalSink {
             .default_output_device()
             .ok_or_else(|| anyhow::anyhow!("no default output device"))?;
         let supported = device.default_output_config()?;
-        let config: cpal::StreamConfig = supported.into();
         let ring: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let producer = ring.clone();
-        let cap = config.sample_rate as usize * config.channels as usize;
-        let stream = device.build_output_stream(
-            config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut guard = producer.lock().unwrap();
-                for slot in data.iter_mut() {
-                    *slot = guard.pop_front().unwrap_or(0.0);
-                }
-            },
-            |err| eprintln!("[audio] output stream error: {err}"),
-            None,
-        )?;
+        let mut wide: cpal::StreamConfig = supported.into();
+        wide.buffer_size = cpal::BufferSize::Fixed((wide.sample_rate / 8).max(2048));
+        let build = |config: cpal::StreamConfig, ring: Arc<Mutex<VecDeque<f32>>>| {
+            device.build_output_stream(
+                config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let mut guard = ring.lock().unwrap();
+                    for slot in data.iter_mut() {
+                        *slot = guard.pop_front().unwrap_or(0.0);
+                    }
+                },
+                |err| eprintln!("[audio] output stream error: {err}"),
+                None,
+            )
+        };
+        let stream = build(wide, ring.clone()).or_else(|_| {
+            let plain: cpal::StreamConfig = supported.into();
+            build(plain, ring.clone())
+        })?;
         stream.play()?;
         Ok(CpalSink {
             ring,

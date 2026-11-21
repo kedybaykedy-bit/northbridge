@@ -18,5 +18,5 @@ pub use frame::{
     Direction, FrameMeta, build_header, direction_of, parse_header,
 };
 pub use playback::{AudioSink, NullSink};
-pub use queue::{AUDIO_QUEUE_CAP, AudioQueue, QueuedAudio};
+pub use queue::{AUDIO_QUEUE_CAP, AudioQueue, JITTER_MAX_CONCEAL, JITTER_PREBUFFER, JitterBuffer, JitterStats, QueuedAudio};
 pub use server::{AudioServer, PORT_OFFSET};

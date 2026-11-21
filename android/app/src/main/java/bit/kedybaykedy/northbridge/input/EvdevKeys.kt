@@ -32,6 +32,7 @@ object Evdev {
     const val KEY_F10 = 68
     const val KEY_F11 = 87
     const val KEY_F12 = 88
+    const val KEY_DELETE = 111
 
     private val unshifted = mapOf(
         'a' to 30,

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use x11rb::connection::Connection;
+use x11rb::errors::{ConnectionError, ParseError, ReplyError, ReplyOrIdError};
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     AtomEnum, ConfigureWindowAux, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask,
@@ -11,6 +13,77 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT};
 
 pub const TITLE: &[u8] = b"Northbridge \xe2\x80\x94 mirror";
+
+fn io_kind_dead(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+            | ErrorKind::UnexpectedEof
+    )
+}
+
+fn connection_error_dead(err: &ConnectionError) -> bool {
+    match err {
+        ConnectionError::IoError(io) => io_kind_dead(io.kind()),
+        ConnectionError::ParseError(_) => true,
+        _ => false,
+    }
+}
+
+pub fn is_connection_dead(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(conn) = cause.downcast_ref::<ConnectionError>() {
+            if connection_error_dead(conn) {
+                return true;
+            }
+            continue;
+        }
+        if let Some(reply) = cause.downcast_ref::<ReplyError>() {
+            match reply {
+                ReplyError::ConnectionError(conn) => {
+                    if connection_error_dead(conn) {
+                        return true;
+                    }
+                }
+                ReplyError::X11Error(_) => {}
+            }
+            continue;
+        }
+        if let Some(reply) = cause.downcast_ref::<ReplyOrIdError>() {
+            match reply {
+                ReplyOrIdError::ConnectionError(conn) => {
+                    if connection_error_dead(conn) {
+                        return true;
+                    }
+                }
+                ReplyOrIdError::IdsExhausted | ReplyOrIdError::X11Error(_) => {}
+            }
+            continue;
+        }
+        if let Some(parse) = cause.downcast_ref::<ParseError>() {
+            let _ = parse;
+            return true;
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            if io_kind_dead(io.kind()) {
+                return true;
+            }
+            continue;
+        }
+        let msg = cause.to_string().to_lowercase();
+        if msg.contains("closed the connection")
+            || msg.contains("broken pipe")
+            || msg.contains("connection reset")
+            || msg.contains("connection aborted")
+        {
+            return true;
+        }
+    }
+    false
+}
 
 pub struct MirrorWindow {
     conn: RustConnection,
@@ -114,20 +187,27 @@ impl MirrorWindow {
         })
     }
 
-    pub fn set_title(&mut self, text: &[u8]) {
+    pub fn set_title(&mut self, text: &[u8]) -> bool {
         if self.net_wm_name == 0 || self.utf8_string == 0 {
-            return;
+            return true;
         }
-        if let Ok(cookie) = self.conn.change_property8(
+        let cookie = match self.conn.change_property8(
             PropMode::REPLACE,
             self.window,
             self.net_wm_name,
             self.utf8_string,
             text,
         ) {
-            let _ = cookie.check();
+            Ok(cookie) => cookie,
+            Err(e) => return !connection_error_dead(&e),
+        };
+        if let Err(ReplyError::ConnectionError(conn)) = cookie.check() {
+            return !connection_error_dead(&conn);
         }
-        let _ = self.conn.flush();
+        match self.conn.flush() {
+            Ok(()) => true,
+            Err(e) => !connection_error_dead(&e),
+        }
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -200,5 +280,59 @@ impl MirrorWindow {
         let setup = self.conn.setup();
         let s = &setup.roots[self.screen];
         (s.width_in_pixels, s.height_in_pixels)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Error as IoError;
+
+    fn broken_pipe() -> anyhow::Error {
+        let io = IoError::new(ErrorKind::BrokenPipe, "busted");
+        anyhow::Error::from(ConnectionError::from(io)).context("put image check")
+    }
+
+    #[test]
+    fn broken_pipe_is_dead() {
+        assert!(is_connection_dead(&broken_pipe()));
+    }
+
+    #[test]
+    fn closed_connection_eof_is_dead() {
+        let io = IoError::new(ErrorKind::UnexpectedEof, "The X11 server closed the connection");
+        let err = anyhow::Error::from(ConnectionError::from(io)).context("poll event");
+        assert!(is_connection_dead(&err));
+    }
+
+    #[test]
+    fn reply_connection_error_is_dead() {
+        let io = IoError::new(ErrorKind::ConnectionReset, "reset");
+        let conn = ConnectionError::from(io);
+        let err = anyhow::Error::from(ReplyError::from(conn)).context("resize check");
+        assert!(is_connection_dead(&err));
+    }
+
+    #[test]
+    fn raw_io_broken_pipe_is_dead() {
+        let err: anyhow::Error =
+            IoError::new(ErrorKind::BrokenPipe, "write failed").into();
+        assert!(is_connection_dead(&err));
+    }
+
+    #[test]
+    fn x11_parse_error_is_dead() {
+        let err = anyhow::Error::from(ConnectionError::from(ParseError::InsufficientData));
+        assert!(is_connection_dead(&err));
+    }
+
+    #[test]
+    fn transient_errors_are_not_dead() {
+        let err: anyhow::Error = anyhow::anyhow!("short bgra: 3 < 100");
+        assert!(!is_connection_dead(&err));
+        let err = anyhow::Error::from(ConnectionError::MaximumRequestLengthExceeded);
+        assert!(!is_connection_dead(&err));
+        let err: anyhow::Error = IoError::new(ErrorKind::TimedOut, "slow").into();
+        assert!(!is_connection_dead(&err));
     }
 }

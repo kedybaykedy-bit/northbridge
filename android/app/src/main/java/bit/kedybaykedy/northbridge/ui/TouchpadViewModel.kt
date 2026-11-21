@@ -20,8 +20,11 @@ class TouchpadViewModel : ViewModel() {
     private val _altLatched = MutableStateFlow(false)
     val altLatched: StateFlow<Boolean> = _altLatched.asStateFlow()
 
-    private val _keyboardOpen = MutableStateFlow(false)
-    val keyboardOpen: StateFlow<Boolean> = _keyboardOpen.asStateFlow()
+    private val _shiftLatched = MutableStateFlow(false)
+    val shiftLatched: StateFlow<Boolean> = _shiftLatched.asStateFlow()
+
+    private val _symLatched = MutableStateFlow(false)
+    val symLatched: StateFlow<Boolean> = _symLatched.asStateFlow()
 
     private var latchGeneration = 0
 
@@ -33,21 +36,30 @@ class TouchpadViewModel : ViewModel() {
         send(InputMsg.Button(button, down))
     }
 
+    fun clickButton(button: MouseButton) {
+        send(InputMsg.Button(button, true))
+        send(InputMsg.Button(button, false))
+    }
+
     fun tapKey(code: Int) {
-        emitWithLatchedModifiers(code)
+        emitWithLatchedModifiers(code, withShift = false)
     }
 
     fun tapSpecial(code: Int) {
-        emitWithLatchedModifiers(code)
+        emitWithLatchedModifiers(code, withShift = false)
     }
 
     fun typeChar(char: Char) {
+        val ctrl = _ctrlLatched.value
+        val alt = _altLatched.value
+        val shift = _shiftLatched.value
         val code = Evdev.usPositionCode(char)
-        if ((_ctrlLatched.value || _altLatched.value) && code != null) {
-            emitWithLatchedModifiers(code)
+        if ((ctrl || alt) && code != null) {
+            emitWithLatchedModifiers(code, withShift = shift)
         } else {
             clearLatches()
-            send(InputMsg.Type(char.toString()))
+            val out = if (shift) shiftedChar(char) else char
+            send(InputMsg.Type(out.toString()))
         }
     }
 
@@ -61,22 +73,26 @@ class TouchpadViewModel : ViewModel() {
         scheduleLatchAutoClear()
     }
 
-    fun setKeyboardOpen(open: Boolean) {
-        _keyboardOpen.value = open
+    fun toggleShift() {
+        _shiftLatched.value = !_shiftLatched.value
+        scheduleLatchAutoClear()
     }
 
-    fun toggleKeyboard() {
-        _keyboardOpen.value = !_keyboardOpen.value
+    fun toggleSym() {
+        _symLatched.value = !_symLatched.value
+        scheduleLatchAutoClear()
     }
 
-    private fun emitWithLatchedModifiers(code: Int) {
+    private fun emitWithLatchedModifiers(code: Int, withShift: Boolean) {
         val ctrl = _ctrlLatched.value
         val alt = _altLatched.value
         clearLatches()
         if (ctrl) send(InputMsg.Key(Evdev.KEY_LEFTCTRL, true))
         if (alt) send(InputMsg.Key(Evdev.KEY_LEFTALT, true))
+        if (withShift) send(InputMsg.Key(Evdev.KEY_LEFTSHIFT, true))
         send(InputMsg.Key(code, true))
         send(InputMsg.Key(code, false))
+        if (withShift) send(InputMsg.Key(Evdev.KEY_LEFTSHIFT, false))
         if (alt) send(InputMsg.Key(Evdev.KEY_LEFTALT, false))
         if (ctrl) send(InputMsg.Key(Evdev.KEY_LEFTCTRL, false))
     }
@@ -85,10 +101,12 @@ class TouchpadViewModel : ViewModel() {
         latchGeneration += 1
         _ctrlLatched.value = false
         _altLatched.value = false
+        _shiftLatched.value = false
+        _symLatched.value = false
     }
 
     private fun scheduleLatchAutoClear() {
-        if (!_ctrlLatched.value && !_altLatched.value) {
+        if (!_ctrlLatched.value && !_altLatched.value && !_shiftLatched.value && !_symLatched.value) {
             latchGeneration += 1
             return
         }
@@ -98,11 +116,31 @@ class TouchpadViewModel : ViewModel() {
             if (generation == latchGeneration) {
                 _ctrlLatched.value = false
                 _altLatched.value = false
+                _shiftLatched.value = false
+                _symLatched.value = false
             }
         }
     }
 
     companion object {
         private const val LATCH_AUTO_CLEAR_MS = 3000L
+
+        private val digitSymbols = mapOf(
+            '1' to '!',
+            '2' to '@',
+            '3' to '#',
+            '4' to '$',
+            '5' to '%',
+            '6' to '^',
+            '7' to '&',
+            '8' to '*',
+            '9' to '(',
+            '0' to ')',
+        )
+
+        fun shiftedChar(char: Char): Char {
+            digitSymbols[char]?.let { return it }
+            return char.uppercaseChar()
+        }
     }
 }

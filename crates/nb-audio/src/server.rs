@@ -1,6 +1,5 @@
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nb_core::identity::Identity;
@@ -18,11 +17,11 @@ use crate::frame::{self, Direction, FrameMeta, direction_of};
 use crate::playback::{AudioSink, NullSink};
 #[cfg(feature = "cpal-out")]
 use crate::playback::CpalSink;
-use crate::queue::{AUDIO_QUEUE_CAP, AudioQueue, QueuedAudio};
+use crate::queue::{AUDIO_QUEUE_CAP, AudioQueue, JitterBuffer, QueuedAudio};
 
 pub const PORT_OFFSET: u16 = 3;
 pub const MAX_LINE: usize = 65536;
-pub const UPLINK_CAP: usize = 3;
+pub const UPLINK_CAP: usize = 32;
 
 struct SessionState {
     peer_fp: Option<String>,
@@ -40,7 +39,7 @@ struct ServerInner {
     tls: Option<Arc<rustls::ServerConfig>>,
     session: Mutex<SessionState>,
     live: Mutex<Option<LiveSlot>>,
-    uplink: Mutex<VecDeque<Vec<i16>>>,
+    uplink: Mutex<JitterBuffer>,
     uplink_count: Mutex<u64>,
     last_uplink: Mutex<Option<Vec<i16>>>,
 }
@@ -76,7 +75,7 @@ impl AudioServer {
                 generation: 0,
             }),
             live: Mutex::new(None),
-            uplink: Mutex::new(VecDeque::new()),
+            uplink: Mutex::new(JitterBuffer::new(UPLINK_CAP)),
             uplink_count: Mutex::new(0),
             last_uplink: Mutex::new(None),
         });
@@ -192,17 +191,17 @@ fn spawn_playback(inner: Arc<ServerInner>) {
             #[cfg(not(feature = "cpal-out"))]
             let mut sink: Box<dyn AudioSink> = Box::new(NullSink::new());
             eprintln!("[audio] playback sink: {}", sink.sink_name());
+            let step = Duration::from_millis(crate::codec::FRAME_MS);
+            let mut next = Instant::now() + step;
             loop {
-                std::thread::sleep(Duration::from_millis(crate::codec::FRAME_MS));
-                let next = {
-                    let mut uplink = inner.uplink.lock().unwrap();
-                    while uplink.len() > 1 {
-                        uplink.pop_front();
-                    }
-                    uplink.pop_front()
-                };
-                if let Some(pcm) = next {
-                    sink.push(&pcm);
+                let pcm = inner.uplink.lock().unwrap().next();
+                sink.push(&pcm);
+                next += step;
+                let now = Instant::now();
+                if next > now {
+                    std::thread::sleep(next - now);
+                } else if now.duration_since(next) > step * 8 {
+                    next = now + step;
                 }
             }
         });
@@ -247,6 +246,7 @@ async fn serve_one(
     acceptor: TlsAcceptor,
     stream: TcpStream,
 ) -> Result<()> {
+    let _ = stream.set_nodelay(true);
     let tls_stream = acceptor.accept(stream).await.context("TLS handshake")?;
     let peer_fp = {
         let (_, conn) = tls_stream.get_ref();
@@ -337,7 +337,7 @@ async fn serve_one(
                         });
                     }
                 }
-                let queued = downlink.lock().unwrap().take_newest();
+                let queued = downlink.lock().unwrap().pop_oldest();
                 if let Some(queued) = queued {
                     let meta = FrameMeta {
                         seq: seq_out,
@@ -376,11 +376,7 @@ async fn serve_one(
                 }
                 match decode_frame(meta.codec, &payload) {
                     Ok(pcm) => {
-                        let mut uplink = inner.uplink.lock().unwrap();
-                        while uplink.len() >= UPLINK_CAP {
-                            uplink.pop_front();
-                        }
-                        uplink.push_back(pcm.clone());
+                        inner.uplink.lock().unwrap().push(pcm.clone());
                         *inner.uplink_count.lock().unwrap() += 1;
                         *inner.last_uplink.lock().unwrap() = Some(pcm);
                     }
