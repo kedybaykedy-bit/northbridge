@@ -192,6 +192,7 @@ class AudioClient(
             socket.connect(InetSocketAddress(host, audioPort), CONNECT_TIMEOUT_MS)
             socket.soTimeout = OPEN_TIMEOUT_MS
             socket.keepAlive = true
+            socket.tcpNoDelay = true
             try {
                 socket.sendBufferSize = 32 * 1024
             } catch (_: Exception) {
@@ -559,7 +560,7 @@ class AudioClient(
         } catch (_: Exception) {
             0
         }
-        val size = maxOf(if (min > 0) min else 0, FRAME_BYTES * 4)
+        val size = maxOf(if (min > 0) min else 0, FRAME_BYTES * 3)
         val attributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)

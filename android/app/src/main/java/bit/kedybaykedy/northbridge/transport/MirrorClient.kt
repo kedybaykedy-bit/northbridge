@@ -2,6 +2,7 @@ package bit.kedybaykedy.northbridge.transport
 
 import android.content.res.Resources
 import android.util.Log
+import bit.kedybaykedy.northbridge.input.NativePointer
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.IOException
@@ -270,9 +271,6 @@ class MirrorClient(
     private var pendingOpen: kotlinx.coroutines.CompletableDeferred<Int?>? = null
 
     @Volatile
-    private var pendingClosed: kotlinx.coroutines.CompletableDeferred<Unit>? = null
-
-    @Volatile
     private var liveSocket: SSLSocket? = null
 
     @Volatile
@@ -300,7 +298,7 @@ class MirrorClient(
     }
 
     fun startMirror(host: String, packetPort: Int, fingerprint: String, fps: Int = 30, maxW: Int = 1080) {
-        stopMirror()
+        preempt()
         if (host.isBlank() || fingerprint.isBlank() || packetPort !in 1..65535) {
             _state.value = MirrorLinkState.Error("no paired device")
             return
@@ -317,31 +315,30 @@ class MirrorClient(
     }
 
     fun stopMirror() {
-        val wasActive = sessionActive
-        sessionActive = false
-        val job = sessionJob
-        sessionJob = null
-        if (wasActive || job != null) {
-            val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
-            pendingClosed = closed
+        val had = sessionActive || sessionJob != null
+        preempt()
+        if (had) {
             try {
                 channel.sendPacket(KIND_MIRROR, releaseBody())
             } catch (_: Exception) {
             }
-            scope.launch {
-                try {
-                    withTimeout(CONTROL_TIMEOUT_MS) {
-                        closed.await()
-                    }
-                } catch (_: Exception) {
-                } finally {
-                    pendingClosed = null
-                    teardown(job)
-                }
-            }
-        } else {
-            teardown(null)
         }
+        _videoSize.value = null
+        _stats.value = null
+        _state.value = MirrorLinkState.Idle
+    }
+
+    private fun preempt() {
+        sessionActive = false
+        val prev = sessionJob
+        sessionJob = null
+        try {
+            prev?.cancel()
+        } catch (_: Exception) {
+        }
+        closeSocket()
+        MirrorProcs.destroyAll()
+        NativePointer.sessionStop()
     }
 
     private fun route(packet: NetworkPacket) {
@@ -356,18 +353,7 @@ class MirrorClient(
                     open.complete(port)
                 }
             }
-            "closed" -> {
-                val closed = pendingClosed
-                if (closed != null && !closed.isCompleted) {
-                    closed.complete(Unit)
-                }
-                if (sessionActive) {
-                    val job = sessionJob
-                    sessionJob = null
-                    sessionActive = false
-                    scope.launch { teardown(job) }
-                }
-            }
+            "closed" -> Unit
             else -> {
                 _inputs.tryEmit(body)
             }
@@ -375,6 +361,7 @@ class MirrorClient(
     }
 
     private suspend fun runSession(host: String, packetPort: Int, fingerprint: String, fps: Int, maxW: Int) {
+        val mine = coroutineContext[Job]
         _state.value = MirrorLinkState.Opening
         try {
             val size = scaledSize(maxW)
@@ -425,12 +412,24 @@ class MirrorClient(
                 }
             }
         } catch (cancellation: CancellationException) {
-            teardown(null)
+            abandonIfCurrent(mine)
             throw cancellation
         } catch (e: Exception) {
-            teardown(sessionJob)
-            _state.value = MirrorLinkState.Error(e.message ?: "mirror failed")
+            if (abandonIfCurrent(mine)) {
+                _state.value = MirrorLinkState.Error(e.message ?: "mirror failed")
+            }
         }
+    }
+
+    private fun abandonIfCurrent(mine: Job?): Boolean {
+        if (sessionJob !== mine) return false
+        sessionJob = null
+        sessionActive = false
+        closeSocket()
+        MirrorProcs.destroyAll()
+        _videoSize.value = null
+        _stats.value = null
+        return true
     }
 
     private suspend fun openControl(fps: Int, maxW: Int): Int {
@@ -496,6 +495,7 @@ class MirrorClient(
             socket.soTimeout = 0
             liveSocket = socket
             _state.value = MirrorLinkState.Live
+            NativePointer.sessionStart()
             val out = socket.outputStream
             for (unit in queue) {
                 writeFrame(out, unit, width, height)
@@ -505,6 +505,7 @@ class MirrorClient(
             if (liveSocket === socket) {
                 liveSocket = null
             }
+            NativePointer.sessionStop()
             try {
                 socket.close()
             } catch (_: Exception) {
@@ -578,22 +579,6 @@ class MirrorClient(
         val obj = body as? JsonObject ?: return false
         val ok = obj["ok"] as? JsonPrimitive ?: return false
         return ok.content == "true"
-    }
-
-    private fun teardown(job: Job?) {
-        try {
-            job?.cancel()
-        } catch (_: Exception) {
-        }
-        MirrorProcs.destroyAll()
-        closeSocket()
-        if (sessionJob === job) {
-            sessionJob = null
-        }
-        sessionActive = false
-        _videoSize.value = null
-        _stats.value = null
-        _state.value = MirrorLinkState.Idle
     }
 
     private fun closeSocket() {

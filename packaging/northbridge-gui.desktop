@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Northbridge
+Name[tr]=Northbridge
+Comment=Pair, share and control your devices
+Comment[tr]=Cihazlarını eşleştir, paylaş ve kontrol et
+Exec=/home/baykedy/.local/bin/northbridge-gui
+Icon=northbridge
+Terminal=false
+Categories=Network;
+Keywords=phone;mirror;kvm;clipboard;file;transfer;pair;
+StartupNotify=true
+StartupWMClass=northbridge-gui

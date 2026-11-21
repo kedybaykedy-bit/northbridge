@@ -48,6 +48,7 @@ pub struct PipewireSource {
     rx: std::sync::mpsc::Receiver<Vec<i16>>,
     stash: VecDeque<i16>,
     format: Arc<std::sync::Mutex<(u32, u32)>>,
+    phase: f64,
 }
 
 #[cfg(feature = "pipewire-cap")]
@@ -71,6 +72,7 @@ impl PipewireSource {
             rx,
             stash: VecDeque::new(),
             format,
+            phase: 0.0,
         })
     }
 }
@@ -190,31 +192,140 @@ fn build_pipeline(
     }
 
 #[cfg(feature = "pipewire-cap")]
+fn fold_to_stereo(raw: &[i16], channels: usize) -> Vec<i16> {
+    let channels = channels.max(1);
+    let frames = raw.len() / channels;
+    let mut out = Vec::with_capacity(frames * 2);
+    for f in 0..frames {
+        let base = f * channels;
+        if channels == 1 {
+            let s = raw[base];
+            out.push(s);
+            out.push(s);
+        } else {
+            out.push(raw[base]);
+            out.push(raw[base + 1]);
+        }
+    }
+    out
+}
+
+#[cfg(feature = "pipewire-cap")]
+fn resample_to_stereo_48k(
+    stash: &VecDeque<i16>,
+    rate: u32,
+    channels: usize,
+    phase: f64,
+) -> Option<(Vec<i16>, usize, f64)> {
+    if rate == 0 || channels == 0 {
+        return None;
+    }
+    let step = rate as f64 / crate::codec::SAMPLE_RATE as f64;
+    let last = phase + (crate::codec::FRAME_SAMPLES_PER_CH - 1) as f64 * step;
+    let need = last.floor() as usize + 1;
+    if stash.len() < need * channels {
+        return None;
+    }
+    let avail = stash.len() / channels;
+    let mut out = Vec::with_capacity(crate::codec::FRAME_SAMPLES_PER_CH * 2);
+    for i in 0..crate::codec::FRAME_SAMPLES_PER_CH {
+        let pos = phase + i as f64 * step;
+        let i0 = (pos.floor() as usize).min(avail - 1);
+        let frac = (pos - pos.floor()) as f32;
+        let i1 = (i0 + 1).min(avail - 1);
+        for c in 0..2 {
+            let col = if channels == 1 { 0 } else { c.min(channels - 1) };
+            let a = stash[i0 * channels + col] as f32;
+            let b = stash[i1 * channels + col] as f32;
+            out.push((a + (b - a) * frac) as i16);
+        }
+    }
+    let used_frames = need;
+    let next = phase + crate::codec::FRAME_SAMPLES_PER_CH as f64 * step - used_frames as f64;
+    Some((out, used_frames * channels, next))
+}
+
+#[cfg(feature = "pipewire-cap")]
 impl AudioSource for PipewireSource {
     fn next_frame(&mut self) -> Option<Vec<i16>> {
         let (rate, channels) = *self.format.lock().unwrap();
         for chunk in self.rx.try_iter() {
             self.stash.extend(chunk);
         }
-        if rate != crate::codec::SAMPLE_RATE {
-            self.stash.clear();
-            return None;
+        let channels = channels.max(1) as usize;
+        if rate == crate::codec::SAMPLE_RATE {
+            let want = crate::codec::FRAME_SAMPLES_PER_CH * channels;
+            if self.stash.len() < want {
+                return None;
+            }
+            let mut raw = Vec::with_capacity(want);
+            for _ in 0..want {
+                raw.push(self.stash.pop_front().unwrap_or(0));
+            }
+            Some(fold_to_stereo(&raw, channels))
+        } else {
+            let (frame, used, next) =
+                resample_to_stereo_48k(&self.stash, rate, channels, self.phase)?;
+            let used = used.min(self.stash.len());
+            for _ in 0..used {
+                self.stash.pop_front();
+            }
+            self.phase = next;
+            Some(frame)
         }
-        let want = crate::codec::FRAME_SAMPLES_PER_CH * channels.max(1) as usize;
-        for chunk in self.rx.try_iter() {
-            self.stash.extend(chunk);
-        }
-        if self.stash.len() < want {
-            return None;
-        }
-        let mut out = Vec::with_capacity(want);
-        for _ in 0..want {
-            out.push(self.stash.pop_front().unwrap_or(0));
-        }
-        Some(out)
     }
 
     fn source_name(&self) -> &'static str {
         "pipewire"
+    }
+}
+
+#[cfg(all(test, feature = "pipewire-cap"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fold_mono_duplicates_to_stereo() {
+        let raw = vec![10i16, 20, 30];
+        assert_eq!(fold_to_stereo(&raw, 1), vec![10, 10, 20, 20, 30, 30]);
+    }
+
+    #[test]
+    fn fold_stereo_passes_through_and_truncates_extra() {
+        let raw = vec![1i16, 2, 3, 4];
+        assert_eq!(fold_to_stereo(&raw, 2), vec![1, 2, 3, 4]);
+        let raw = vec![1i16, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(fold_to_stereo(&raw, 4), vec![1, 2, 5, 6]);
+    }
+
+    #[test]
+    fn resample_same_rate_matches_fold() {
+        let raw: Vec<i16> = (0..960 * 2).map(|i| i as i16).collect();
+        let mut stash = VecDeque::new();
+        stash.extend(raw.clone());
+        let (frame, used, next) = resample_to_stereo_48k(&stash, 48000, 2, 0.0).expect("frame");
+        assert_eq!(frame, raw);
+        assert_eq!(used, 960 * 2);
+        assert_eq!(next, 0.0);
+    }
+
+    #[test]
+    fn resample_44100_constant_tone_stays_constant() {
+        let raw = vec![1000i16; 900 * 2];
+        let mut stash = VecDeque::new();
+        stash.extend(raw);
+        let (frame, used, next) = resample_to_stereo_48k(&stash, 44100, 2, 0.0).expect("frame");
+        assert_eq!(frame.len(), 960 * 2);
+        assert!(frame.iter().all(|&s| (s - 1000).abs() <= 1));
+        assert_eq!(used, 882 * 2);
+        assert_eq!(next, 0.0);
+    }
+
+    #[test]
+    fn resample_short_stash_returns_none() {
+        let mut stash = VecDeque::new();
+        stash.extend(vec![0i16; 100]);
+        assert!(resample_to_stereo_48k(&stash, 44100, 2, 0.0).is_none());
+        assert!(resample_to_stereo_48k(&stash, 0, 2, 0.0).is_none());
     }
 }

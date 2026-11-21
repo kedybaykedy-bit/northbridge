@@ -103,6 +103,35 @@ enum Cmd {
         /// Device alias or fingerprint prefix.
         target: String,
     },
+    /// Wake a paired phone's display (root keyguard dismiss on device).
+    Wake {
+        /// Device alias or fingerprint prefix.
+        target: String,
+    },
+    /// Wake a paired phone and open an app package on it.
+    Open {
+        /// Device alias or fingerprint prefix.
+        target: String,
+        /// Android package name, e.g. com.android.settings.
+        package: String,
+    },
+    /// List launchable apps on a paired phone.
+    Apps {
+        /// Device alias or fingerprint prefix.
+        target: String,
+    },
+    /// Turn a paired phone's display off.
+    Sleep {
+        /// Device alias or fingerprint prefix.
+        target: String,
+    },
+    /// Hold a paired phone's display awake (or release it).
+    Keepawake {
+        /// Device alias or fingerprint prefix.
+        target: String,
+        /// on or off.
+        state: String,
+    },
     /// Send files to a device over the LocalSend HTTP API.
     Send {
         /// Device alias or fingerprint prefix.
@@ -243,6 +272,11 @@ async fn main() -> Result<()> {
         Cmd::Devices => cmd_devices(&cli.config),
         Cmd::Pair { target } => cmd_pair(&cli.config, &target).await,
         Cmd::Ping { target } => cmd_ping(&cli.config, &target).await,
+        Cmd::Wake { target } => cmd_control_wake(&cli.config, &target).await,
+        Cmd::Open { target, package } => cmd_control_open(&cli.config, &target, &package).await,
+        Cmd::Apps { target } => cmd_control_apps(&cli.config, &target).await,
+        Cmd::Sleep { target } => cmd_control_sleep(&cli.config, &target).await,
+        Cmd::Keepawake { target, state } => cmd_control_keepawake(&cli.config, &target, &state).await,
         Cmd::Send { target, files } => cmd_send(&cli.config, &target, files).await,
         Cmd::Status => cmd_status(&cli.config),
     }
@@ -921,6 +955,187 @@ async fn cmd_ping(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// device control
+// ---------------------------------------------------------------------------
+
+async fn control_roundtrip(
+    cfg: &Option<PathBuf>,
+    target: &str,
+    body: serde_json::Value,
+) -> Result<(String, NetworkPacket)> {
+    let identity = load_identity(cfg, None, None)?;
+    let mut peers = load_peers(cfg)?;
+
+    if peers.resolve(target).is_err() {
+        println!("unknown device {target:?} — discovering first…");
+        quick_discover(&identity, &mut peers).await?;
+    }
+    let (fp, peer) = resolve_with_wait(target, &mut peers).await?;
+    if !peer.trusted {
+        anyhow::bail!(
+            "{} is not paired yet — run `northbridge pair {target}` first",
+            peer.alias
+        );
+    }
+
+    let req = NetworkPacket::new("nb.control", body);
+    let mut last_err = None;
+    for (channel, addr) in peer.dial_order() {
+        let host = addr.host.clone();
+        let packet_port = addr.http_port + 1;
+        match send_packet(&identity, &host, packet_port, &fp, &req).await {
+            Ok(resp) if resp.kind == "nb.control" => {
+                peers.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                save_peers(&peers)?;
+                return Ok((peer.alias.clone(), resp));
+            }
+            Ok(resp) => {
+                last_err = Some(format!("unexpected response: {} {}", resp.kind, resp.body))
+            }
+            Err(e) => last_err = Some(format!("{channel} {host}:{packet_port}: {e:#}")),
+        }
+    }
+    anyhow::bail!(
+        "control failed for {}: {}",
+        peer.alias,
+        last_err.unwrap_or_else(|| "no addresses".into())
+    )
+}
+
+fn control_ok(resp: &NetworkPacket) -> Result<&serde_json::Value> {
+    if resp.body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(&resp.body)
+    } else {
+        let reason = resp
+            .body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("device refused");
+        let action = resp
+            .body
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        anyhow::bail!("{action} failed: {reason}")
+    }
+}
+
+fn yesno(body: &serde_json::Value, key: &str) -> &'static str {
+    match body.get(key).and_then(|v| v.as_bool()) {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "?",
+    }
+}
+
+async fn cmd_control_wake(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
+    let (alias, resp) = control_roundtrip(cfg, target, json!({"t": "wake"})).await?;
+    let body = control_ok(&resp)?;
+    println!(
+        "{} awake: {}  keyguard: {}",
+        alias,
+        yesno(body, "awake"),
+        yesno(body, "keyguard")
+    );
+    if let Some(note) = body.get("note").and_then(|v| v.as_str()) {
+        println!("note: {note}");
+    }
+    Ok(())
+}
+
+async fn cmd_control_open(cfg: &Option<PathBuf>, target: &str, package: &str) -> Result<()> {
+    if package.is_empty()
+        || !package
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+    {
+        anyhow::bail!("bad package name: {package}");
+    }
+    let (alias, resp) = control_roundtrip(cfg, target, json!({"t": "open", "pkg": package})).await?;
+    let body = control_ok(&resp)?;
+    let component = body
+        .get("component")
+        .and_then(|v| v.as_str())
+        .unwrap_or(package);
+    let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("?");
+    println!(
+        "{alias}: started {component} via {method}  (awake: {}  keyguard: {})",
+        yesno(body, "awake"),
+        yesno(body, "keyguard")
+    );
+    Ok(())
+}
+
+fn format_apps_table(apps: &[(String, String)]) -> String {
+    let width = apps
+        .iter()
+        .map(|(p, _)| p.len())
+        .max()
+        .unwrap_or(7)
+        .max("PACKAGE".len());
+    let mut out = format!("{:<width$}  LABEL\n", "PACKAGE", width = width);
+    for (pkg, label) in apps {
+        out.push_str(&format!("{pkg:<width$}  {label}\n", width = width));
+    }
+    out
+}
+
+async fn cmd_control_apps(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
+    let (alias, resp) = control_roundtrip(cfg, target, json!({"t": "apps"})).await?;
+    let body = control_ok(&resp)?;
+    let apps: Vec<(String, String)> = body
+        .get("apps")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    let pkg = e.get("pkg")?.as_str()?.to_string();
+                    let label = e.get("label")?.as_str()?.to_string();
+                    Some((pkg, label))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let total = body
+        .get("total")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(apps.len() as u64);
+    let truncated = body
+        .get("truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    println!(
+        "{alias}: {total} launchable app(s){}",
+        if truncated { " (truncated)" } else { "" }
+    );
+    print!("{}", format_apps_table(&apps));
+    Ok(())
+}
+
+async fn cmd_control_sleep(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
+    let (alias, resp) = control_roundtrip(cfg, target, json!({"t": "sleep"})).await?;
+    let body = control_ok(&resp)?;
+    println!("{} display off (awake: {})", alias, yesno(body, "awake"));
+    Ok(())
+}
+
+async fn cmd_control_keepawake(cfg: &Option<PathBuf>, target: &str, state: &str) -> Result<()> {
+    let on = match state.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => true,
+        "off" | "false" | "0" | "no" => false,
+        _ => anyhow::bail!("state must be on or off, got {state:?}"),
+    };
+    let (alias, resp) = control_roundtrip(cfg, target, json!({"t": "keepawake", "on": on})).await?;
+    let _ = control_ok(&resp)?;
+    if on {
+        println!("{alias}: keepawake on — display held awake while plugged in");
+    } else {
+        println!("{alias}: keepawake off — previous display policy restored");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // send (file transfer, LocalSend HTTP API)
 // ---------------------------------------------------------------------------
 
@@ -1092,4 +1307,45 @@ fn unique_download_path(dir: &Path, file_name: &str) -> PathBuf {
         }
     }
     dir.join(format!("{stem}-{}", nb_core::packet::now_ms()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apps_table_aligns_columns() {
+        let apps = vec![
+            ("a.b".to_string(), "Bee".to_string()),
+            ("long.package.name".to_string(), "Long".to_string()),
+        ];
+        let table = format_apps_table(&apps);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("PACKAGE"));
+        assert!(lines[0].ends_with("LABEL"));
+        assert!(lines[1].starts_with("a.b              "));
+        assert!(lines[2].starts_with("long.package.name"));
+        assert!(lines[1].ends_with("Bee"));
+    }
+
+    #[test]
+    fn control_ok_accepts_and_rejects() {
+        let good = NetworkPacket::new("nb.control", json!({"ok": true, "action": "wake"}));
+        assert!(control_ok(&good).is_ok());
+        let bad = NetworkPacket::new(
+            "nb.control",
+            json!({"ok": false, "action": "open", "error": "no launcher activity"}),
+        );
+        let err = control_ok(&bad).unwrap_err().to_string();
+        assert!(err.contains("open"));
+        assert!(err.contains("no launcher activity"));
+    }
+
+    #[test]
+    fn yesno_handles_missing() {
+        let body = json!({"awake": true});
+        assert_eq!(yesno(&body, "awake"), "yes");
+        assert_eq!(yesno(&body, "keyguard"), "?");
+    }
 }

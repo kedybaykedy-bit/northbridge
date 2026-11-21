@@ -5,6 +5,8 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import android.content.Intent
+import bit.kedybaykedy.northbridge.keepalive.PacketKeepAliveService
 import bit.kedybaykedy.northbridge.ui.NorthbridgeRoot
 import bit.kedybaykedy.northbridge.ui.theme.NorthbridgeTheme
 
@@ -19,5 +21,10 @@ class MainActivity : ComponentActivity() {
                 NorthbridgeRoot()
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        startForegroundService(Intent(this, PacketKeepAliveService::class.java))
     }
 }

@@ -9,6 +9,7 @@ members = [
     "crates/nb-screen",
     "crates/nb-audio",
     "crates/nb-mirror",
+    "crates/nb-gui",
     "plugins/nb-ping",
     "plugins/nb-clipboard",
 ]

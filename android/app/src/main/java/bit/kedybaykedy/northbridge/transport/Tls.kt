@@ -9,6 +9,7 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.KeyManager
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLServerSocketFactory
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509KeyManager
@@ -69,7 +70,34 @@ object Tls {
                 delegate.getServerAliases(keyType, issuers)
         }
 
+    fun trustingFingerprints(fingerprints: () -> Set<String>): X509TrustManager {
+        return object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                val certificate = chain?.firstOrNull()
+                    ?: throw CertificateException("peer presented no certificate")
+                val actual = sha256Upper(certificate.encoded)
+                if (!fingerprints().map { it.uppercase() }.contains(actual)) {
+                    throw CertificateException("unknown peer fingerprint: $actual")
+                }
+            }
+
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        }
+    }
+
     fun socketFactory(identity: PhoneIdentity, trust: X509TrustManager): SSLSocketFactory {
+        val context = serverContext(identity, trust)
+        return context.socketFactory
+    }
+
+    fun serverSocketFactory(identity: PhoneIdentity, trust: X509TrustManager): SSLServerSocketFactory {
+        val context = serverContext(identity, trust)
+        return context.serverSocketFactory
+    }
+
+    private fun serverContext(identity: PhoneIdentity, trust: X509TrustManager): SSLContext {
         val keyStore = KeyStore.getInstance("PKCS12")
         keyStore.load(null, null)
         keyStore.setKeyEntry("nb", identity.privateKey, charArrayOf(), arrayOf<Certificate>(identity.cert))
@@ -80,6 +108,6 @@ object Tls {
         }
         val context = SSLContext.getInstance("TLS")
         context.init(keyManagers.toTypedArray(), arrayOf<TrustManager>(trust), null)
-        return context.socketFactory
+        return context
     }
 }

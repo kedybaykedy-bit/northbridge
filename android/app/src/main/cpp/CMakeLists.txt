@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(nbpointer C)
+add_library(nbpointer SHARED nbpointer.c)
+find_library(log-lib log)
+target_link_libraries(nbpointer ${log-lib})

@@ -1,10 +1,12 @@
+mod adapt;
 mod capture;
 mod control;
 mod frame;
 mod queue;
 mod server;
 
-pub use capture::Strategy;
+pub use adapt::AdaptState;
+pub use capture::{DisplaySelector, Strategy};
 pub use control::{
     CAP, DEFAULT_FPS, DEFAULT_MAX_W, FRAME_OPEN_KIND, handle_control, handle_control_from,
 };

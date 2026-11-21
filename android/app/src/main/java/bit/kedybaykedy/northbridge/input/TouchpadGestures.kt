@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -24,6 +25,8 @@ import kotlin.math.hypot
 private const val TAP_MAX_MS = 300L
 private const val DOUBLE_TAP_WINDOW_MS = 300L
 private const val MOVE_INTERVAL_MS = 16L
+
+const val UI_TOGGLE_ID = "ui_toggle"
 
 @Composable
 fun Modifier.touchpadGestures(send: (InputMsg) -> Unit): Modifier {
@@ -181,7 +184,9 @@ class KeyZoneMap {
     fun hitTest(position: Offset): String? {
         val root = surface ?: return null
         if (!root.isAttached) return null
-        for ((id, child) in layouts) {
+        val ordered = layouts.entries.toList()
+        for (index in ordered.size - 1 downTo 0) {
+            val (id, child) = ordered[index]
             if (!child.isAttached) continue
             val origin = try {
                 root.localPositionOf(child, Offset.Zero)
@@ -243,6 +248,9 @@ fun Modifier.unifiedInputGestures(
                 var keyId: String? = zones.hitTest(down.position)
                 currentHost.onPressedChange(keyId)
 
+                if (keyId == UI_TOGGLE_ID) {
+                    consumeUiToggleTap(currentHost, keyId, startPos)
+                } else {
                 var moveAccX = 0f
                 var moveAccY = 0f
                 var scrollAccX = 0f
@@ -417,6 +425,80 @@ fun Modifier.unifiedInputGestures(
                 } else {
                     val releasedHold = if (holdFired) heldId else null
                     if (releasedHold != null) currentHost.onHoldEnd(releasedHold)
+                }
+                }
+            }
+        }
+    }
+}
+
+private suspend fun AwaitPointerEventScope.consumeUiToggleTap(
+    host: UnifiedKeyHost,
+    keyId: String,
+    anchor: Offset,
+) {
+    var clean = true
+    var peak = 0f
+    while (true) {
+        val event = awaitPointerEvent()
+        val pressed = event.changes.filter { it.pressed }
+        if (pressed.isEmpty()) break
+        if (pressed.size > 1) clean = false
+        val first = pressed[0]
+        val travel = hypot(first.position.x - anchor.x, first.position.y - anchor.y)
+        if (travel > peak) peak = travel
+        if (peak > viewConfiguration.touchSlop) clean = false
+    }
+    host.onPressedChange(null)
+    if (clean) host.onTap(keyId)
+}
+
+@Composable
+fun Modifier.keyPressGestures(
+    zones: KeyZoneMap,
+    host: UnifiedKeyHost,
+): Modifier {
+    val currentHost by rememberUpdatedState(host)
+    return this.pointerInput(zones) {
+        coroutineScope {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val tappedKey: String? = zones.hitTest(down.position)
+                currentHost.onPressedChange(tappedKey)
+                var holdFired = false
+                var holdJob: Job? = null
+                var repeatJob: Job? = null
+                if (tappedKey != null) {
+                    if (currentHost.isHoldable(tappedKey)) {
+                        holdJob = launch {
+                            delay(HOLD_START_MS)
+                            currentHost.onHoldStart(tappedKey)
+                            holdFired = true
+                        }
+                    } else if (currentHost.isRepeatable(tappedKey)) {
+                        repeatJob = launch {
+                            delay(REPEAT_START_MS)
+                            while (true) {
+                                currentHost.onRepeat(tappedKey)
+                                delay(REPEAT_INTERVAL_MS)
+                            }
+                        }
+                    }
+                }
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val pressed = event.changes.filter { it.pressed }
+                    if (pressed.isEmpty()) break
+                }
+                holdJob?.cancel()
+                repeatJob?.cancel()
+                currentHost.onPressedChange(null)
+                if (tappedKey != null) {
+                    if (holdFired) {
+                        currentHost.onHoldEnd(tappedKey)
+                    } else {
+                        currentHost.onTap(tappedKey)
+                    }
                 }
             }
         }

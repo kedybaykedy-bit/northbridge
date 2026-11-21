@@ -1,6 +1,8 @@
 package bit.kedybaykedy.northbridge.transport
 
 import android.graphics.BitmapFactory
+import android.os.SystemClock
+import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import java.io.ByteArrayOutputStream
@@ -18,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -122,6 +125,7 @@ class ScreenClient(
         val trust = Tls.pinned(fingerprint)
         val factory = Tls.socketFactory(identity, trust)
         val socket = factory.createSocket() as SSLSocket
+        val decodeScope = CoroutineScope(Job() + Dispatchers.Default)
         try {
             socket.connect(InetSocketAddress(host, framePort), CONNECT_TIMEOUT_MS)
             socket.soTimeout = OPEN_TIMEOUT_MS
@@ -149,8 +153,11 @@ class ScreenClient(
             socket.soTimeout = FRAME_TIMEOUT_MS
             liveSocket = socket
             _state.value = ScreenLinkState.Streaming
-            readFrames(DataInputStream(socket.inputStream))
+            Log.i(TAG, "streaming frames from " + host + ":" + framePort)
+            readFrames(DataInputStream(socket.inputStream), decodeScope)
+            Log.w(TAG, "frame socket closed by peer")
         } finally {
+            decodeScope.coroutineContext[Job]?.cancel()
             if (liveSocket === socket) {
                 liveSocket = null
             }
@@ -161,11 +168,36 @@ class ScreenClient(
         }
     }
 
-    private fun readFrames(input: DataInputStream) {
+    private fun readFrames(input: DataInputStream, decodeScope: CoroutineScope) {
         val header = ByteArray(HEADER_LEN)
         var lastSeq = -1L
+        var lastArrivalMs = 0L
+        var windowFrames = 0
+        var windowSumMs = 0L
+        var windowMaxGapMs = 0L
+        var pending: Job? = null
         while (true) {
             input.readFully(header)
+            val nowMs = SystemClock.uptimeMillis()
+            if (lastArrivalMs > 0L) {
+                val gap = nowMs - lastArrivalMs
+                windowSumMs += gap
+                if (gap > windowMaxGapMs) {
+                    windowMaxGapMs = gap
+                }
+                if (gap >= STALL_GAP_MS) {
+                    Log.w(TAG, "stall gap=" + gap + "ms, resuming")
+                }
+            }
+            lastArrivalMs = nowMs
+            windowFrames++
+            if (windowFrames >= CADENCE_WINDOW) {
+                val avg = windowSumMs / windowFrames.coerceAtLeast(1)
+                Log.i(TAG, "cadence frames=" + windowFrames + " avg_gap_ms=" + avg + " max_gap_ms=" + windowMaxGapMs + " dropped=" + droppedFrames)
+                windowFrames = 0
+                windowSumMs = 0L
+                windowMaxGapMs = 0L
+            }
             val buf = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN)
             if (buf.int != MAGIC_NBS1) {
                 throw IOException("screen: bad magic")
@@ -189,8 +221,13 @@ class ScreenClient(
                 droppedFrames += seq - lastSeq - 1
             }
             lastSeq = seq
-            val frame = decodeFrame(payload, width, height, seq) ?: continue
-            _frames.tryEmit(frame)
+            pending?.cancel()
+            pending = decodeScope.launch {
+                val frame = decodeFrame(payload, width, height, seq)
+                if (isActive && frame != null) {
+                    _frames.tryEmit(frame)
+                }
+            }
         }
     }
 
@@ -246,6 +283,7 @@ class ScreenClient(
     }
 
     private companion object {
+        const val TAG = "ScreenClient"
         const val KIND_FRAME_OPEN = "nb.screen.frame.open"
         const val HEADER_LEN = 28
         const val MAGIC_NBS1 = 0x4E425331
@@ -253,7 +291,9 @@ class ScreenClient(
         const val MAX_PIXELS = 1_000_000L
         const val CONNECT_TIMEOUT_MS = 5000
         const val OPEN_TIMEOUT_MS = 10000
-        const val FRAME_TIMEOUT_MS = 30000
+        const val FRAME_TIMEOUT_MS = 15000
         const val LINE_MAX_BYTES = 65536
+        const val STALL_GAP_MS = 1500L
+        const val CADENCE_WINDOW = 60
     }
 }

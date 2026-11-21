@@ -17,13 +17,17 @@ use crate::control::{CAP, DEFAULT_FPS, DEFAULT_MAX_W, FRAME_OPEN_KIND};
 use crate::decode::H264Decoder;
 use crate::display::{MirrorWindow, is_connection_dead};
 use crate::events::{
-    KeyAction, button_name, key_action, normalize_coord, scroll_delta, xkey_to_evdev,
+    DragTracker, KeyAction, button_cancel_packet, button_down_packet, button_name,
+    button_up_packet, hover_packet, key_action, move_packet, normalize_coord, scroll_delta,
+    xkey_to_evdev,
 };
 use crate::frame::{self, FrameMeta};
 
 pub const MAX_LINE: usize = 65536;
 pub const FRAME_QUEUE_CAP: usize = 512;
 pub const MOTION_THROTTLE: Duration = Duration::from_millis(16);
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const STALL_RESET: Duration = Duration::from_secs(10);
 
 struct SessionState {
     peer_fp: Option<String>,
@@ -316,7 +320,9 @@ async fn serve_one(
             break;
         }
         let mut header = [0u8; 28];
-        if reader.read_exact(&mut header).await.is_err() {
+        let header_read =
+            tokio::time::timeout(FRAME_READ_TIMEOUT, reader.read_exact(&mut header)).await;
+        if !matches!(header_read, Ok(Ok(_))) {
             break;
         }
         let (meta, len) = match frame::parse_header(&header) {
@@ -327,7 +333,9 @@ async fn serve_one(
             }
         };
         let mut payload = vec![0u8; len as usize];
-        if reader.read_exact(&mut payload).await.is_err() {
+        let payload_read =
+            tokio::time::timeout(FRAME_READ_TIMEOUT, reader.read_exact(&mut payload)).await;
+        if !matches!(payload_read, Ok(Ok(_))) {
             break;
         }
         if dumped < 40 {
@@ -395,6 +403,8 @@ struct UiForwarder<'a> {
     can_send: bool,
     pressed: HashSet<u8>,
     pointer: Option<(f64, f64)>,
+    drag: DragTracker,
+    last_move: Instant,
 }
 
 impl<'a> UiForwarder<'a> {
@@ -410,9 +420,10 @@ impl<'a> UiForwarder<'a> {
     }
 
     fn release_all(&mut self) {
+        self.drag.clear();
         for detail in std::mem::take(&mut self.pressed) {
             if let Some(name) = button_name(detail) {
-                self.push(json!({"t": "button", "b": name, "down": false}));
+                self.push(button_cancel_packet(name));
                 if !self.can_send {
                     break;
                 }
@@ -452,6 +463,8 @@ fn ui_loop(
         can_send: true,
         pressed: HashSet::new(),
         pointer: None,
+        drag: DragTracker::new(),
+        last_move: Instant::now(),
     };
     let mut shown = 0u64;
     let mut waits = 0u64;
@@ -462,7 +475,6 @@ fn ui_loop(
     let mut t1s = Instant::now();
     let mut last_lat = 0u64;
     let mut last_frame_at = Instant::now();
-    let mut ever_framed = false;
     loop {
         if !server.matches(generation, &peer_fp) {
             eprintln!("[mirror] ui thread end (gen {generation} replaced)");
@@ -470,14 +482,14 @@ fn ui_loop(
         }
         let batch = queue.lock().unwrap().drain();
         if batch.is_empty() {
-            if !ever_framed && last_frame_at.elapsed() >= Duration::from_secs(10) {
-                eprintln!("[mirror] no frames in10s — closing empty window");
+            if last_frame_at.elapsed() >= STALL_RESET {
+                eprintln!("[mirror] no frames in 10s — resetting session (gen {generation})");
+                server.close_generation(&peer_fp, generation);
                 break;
             }
             std::thread::sleep(Duration::from_millis(4));
         } else {
             last_frame_at = Instant::now();
-            ever_framed = true;
             let mut latest: Option<(Vec<u8>, u16, u16)> = None;
             let n = batch.len();
             for (idx, raw) in batch.into_iter().enumerate() {
@@ -624,6 +636,17 @@ fn drain_events(
                 let nx = normalize_coord(ev.event_x as f64, w as f64);
                 let ny = normalize_coord(ev.event_y as f64, h as f64);
                 fwd.pointer = Some((nx, ny));
+                if fwd.drag.is_held() {
+                    if fwd.last_move.elapsed() >= MOTION_THROTTLE {
+                        fwd.last_move = Instant::now();
+                        if fwd.drag.motion(nx, ny) {
+                            fwd.push(move_packet(nx, ny));
+                        }
+                    }
+                } else if fwd.last_move.elapsed() >= MOTION_THROTTLE {
+                    fwd.last_move = Instant::now();
+                    fwd.push(hover_packet(nx, ny));
+                }
             }
             Event::EnterNotify(ev) => {
                 if !fwd.can_send {
@@ -633,6 +656,8 @@ fn drain_events(
                 let nx = normalize_coord(ev.event_x as f64, w as f64);
                 let ny = normalize_coord(ev.event_y as f64, h as f64);
                 fwd.pointer = Some((nx, ny));
+                fwd.last_move = Instant::now();
+                fwd.push(hover_packet(nx, ny));
             }
             Event::ButtonPress(ev) => {
                 if !fwd.can_send {
@@ -646,7 +671,11 @@ fn drain_events(
                     let ny = normalize_coord(ev.event_y as f64, h as f64);
                     fwd.pointer = Some((nx, ny));
                     fwd.pressed.insert(ev.detail);
-                    fwd.push(json!({"t": "button", "b": name, "down": true, "x": nx, "y": ny}));
+                    if ev.detail == 1 {
+                        fwd.drag.press(nx, ny);
+                        fwd.last_move = Instant::now();
+                    }
+                    fwd.push(button_down_packet(name, nx, ny));
                 }
             }
             Event::ButtonRelease(ev) => {
@@ -656,7 +685,15 @@ fn drain_events(
                 if scroll_delta(ev.detail).is_none() {
                     if let Some(name) = button_name(ev.detail) {
                         fwd.pressed.remove(&ev.detail);
-                        fwd.push(json!({"t": "button", "b": name, "down": false}));
+                        if ev.detail == 1 {
+                            let (w, h) = window.size();
+                            let nx = normalize_coord(ev.event_x as f64, w as f64);
+                            let ny = normalize_coord(ev.event_y as f64, h as f64);
+                            fwd.drag.release(nx, ny);
+                            fwd.push(button_up_packet(name, Some((nx, ny))));
+                        } else {
+                            fwd.push(button_up_packet(name, None));
+                        }
                     }
                 }
             }

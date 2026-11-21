@@ -16,6 +16,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -31,6 +34,8 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import bit.kedybaykedy.northbridge.input.NativePointer
+import bit.kedybaykedy.northbridge.input.PointerMode
 import bit.kedybaykedy.northbridge.ui.theme.AntonFamily
 import bit.kedybaykedy.northbridge.ui.theme.ArchivoBlackFamily
 import bit.kedybaykedy.northbridge.ui.theme.CourierPrimeFamily
@@ -176,6 +181,67 @@ private fun Masthead(alias: String, stateLabel: String) {
 }
 
 @Composable
+private fun PointerToggle() {
+    var selection by rememberSaveable { mutableStateOf(NativePointer.mode.value.name) }
+    val status by NativePointer.status.collectAsState()
+    val options = listOf(
+        PointerMode.AUTO to "OTOMATIK",
+        PointerMode.REAL to "GERCEK",
+        PointerMode.VIRTUAL to "SANAL",
+    )
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            text = "IMLEC",
+            style = TextStyle(
+                fontFamily = ArchivoBlackFamily,
+                fontSize = 11.sp,
+                letterSpacing = 2.sp,
+                color = MmKicker,
+            ),
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            for ((mode, label) in options) {
+                val selected = selection == mode.name
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(if (selected) MmInk else MmBlack)
+                        .clickable {
+                            selection = mode.name
+                            NativePointer.setMode(mode)
+                        }
+                        .padding(horizontal = 8.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = label,
+                        style = TextStyle(
+                            fontFamily = ArchivoBlackFamily,
+                            fontSize = 11.sp,
+                            letterSpacing = 1.sp,
+                            color = if (selected) MmPanel else MmSecondary,
+                        ),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = status,
+            style = TextStyle(
+                fontFamily = CourierPrimeFamily,
+                fontSize = 12.sp,
+                color = MmSecondary,
+            ),
+        )
+    }
+}
+
+@Composable
 fun MirrorScreen(viewModel: MirrorViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsState()
     val meta by viewModel.meta.collectAsState()
@@ -243,6 +309,8 @@ fun MirrorScreen(viewModel: MirrorViewModel = viewModel()) {
                 ),
             )
         }
+        Spacer(Modifier.height(12.dp))
+        PointerToggle()
         Spacer(Modifier.height(12.dp))
         Text(
             text = "Masaustundeki AYNA penceresi acilacak \u2014 bilgisayarda etkilesim pencereye tiklayarak geri gelir.",

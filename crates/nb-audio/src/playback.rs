@@ -45,6 +45,11 @@ pub struct CpalSink {
 }
 
 #[cfg(feature = "cpal-out")]
+pub fn device_buffer_frames(rate: u32) -> u32 {
+    (rate / 20).max(960)
+}
+
+#[cfg(feature = "cpal-out")]
 impl CpalSink {
     pub fn open() -> anyhow::Result<Self> {
         let host = cpal::default_host();
@@ -54,7 +59,7 @@ impl CpalSink {
         let supported = device.default_output_config()?;
         let ring: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let mut wide: cpal::StreamConfig = supported.into();
-        wide.buffer_size = cpal::BufferSize::Fixed((wide.sample_rate / 8).max(2048));
+        wide.buffer_size = cpal::BufferSize::Fixed(device_buffer_frames(wide.sample_rate));
         let build = |config: cpal::StreamConfig, ring: Arc<Mutex<VecDeque<f32>>>| {
             device.build_output_stream(
                 config,
@@ -95,5 +100,17 @@ impl AudioSink for CpalSink {
 
     fn sink_name(&self) -> &'static str {
         "cpal"
+    }
+}
+
+#[cfg(all(test, feature = "cpal-out"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffer_is_fifty_ms_with_twenty_ms_floor() {
+        assert_eq!(device_buffer_frames(48000), 2400);
+        assert_eq!(device_buffer_frames(44100), 2205);
+        assert_eq!(device_buffer_frames(8000), 960);
     }
 }

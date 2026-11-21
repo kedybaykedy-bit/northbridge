@@ -1,0 +1,566 @@
+package bit.kedybaykedy.northbridge.input
+
+import android.content.ComponentName
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
+import android.os.IBinder
+import android.os.SystemClock
+import androidx.core.content.pm.PackageInfoCompat
+import bit.kedybaykedy.northbridge.AppGraph
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import rikka.shizuku.Shizuku
+
+enum class PointerMode {
+    AUTO,
+    REAL,
+    VIRTUAL,
+}
+
+object PointerJni {
+    init {
+        try {
+            System.loadLibrary("nbpointer")
+        } catch (_: Throwable) {
+        }
+    }
+
+    external fun nbCreate(): Int
+    external fun nbMoveRel(dx: Int, dy: Int): Int
+    external fun nbButton(code: Int, down: Boolean): Int
+    external fun nbWheel(delta: Int): Int
+    external fun nbDestroy()
+
+    fun loadExplicit(path: String): Boolean {
+        return try {
+            System.load(path)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun extractLib(apkPath: String, outDir: File, name: String): String? {
+        return try {
+            if (!outDir.exists()) {
+                outDir.mkdirs()
+            }
+            val target = File(outDir, name)
+            var picked: String? = null
+            try {
+                val zip = java.util.zip.ZipFile(apkPath)
+                try {
+                    for (abi in android.os.Build.SUPPORTED_ABIS) {
+                        val entry = zip.getEntry("lib/" + abi + "/libnbpointer.so")
+                        if (entry != null) {
+                            zip.getInputStream(entry).use { input ->
+                                target.outputStream().use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                            picked = target.absolutePath
+                            break
+                        }
+                    }
+                } finally {
+                    try {
+                        zip.close()
+                    } catch (_: Exception) {
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            picked
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+object NativePointer {
+    const val BTN_LEFT = 272
+    const val BTN_RIGHT = 273
+    const val BTN_MIDDLE = 274
+    const val SOCK_PATH = "/data/local/tmp/nbpointer.sock"
+    const val TMP_LIB = "/data/local/tmp/nbpointer_app.so"
+    const val PRIV_LIB = "nbpointer.so"
+    private const val SHIZUKU_REQ = 4411
+    private const val DAEMON_WAIT_MS = 8000L
+
+    val mode = MutableStateFlow(PointerMode.AUTO)
+
+    private val _status = MutableStateFlow("IMLEC: SANAL")
+    val status: StateFlow<String> = _status.asStateFlow()
+
+    private val lock = Any()
+    private var backend: DaemonLink? = null
+    private var shizukuArgs: Shizuku.UserServiceArgs? = null
+    private var shizukuConn: ServiceConnection? = null
+    private var sessionOn = false
+    private var shizukuAsked = false
+    private val held = mutableSetOf<Int>()
+    private var posInit = false
+    private var posX = 0.0
+    private var posY = 0.0
+    private var accX = 0.0
+    private var accY = 0.0
+
+    init {
+        try {
+            Shizuku.addRequestPermissionResultListener { requestCode, grantResult ->
+                if (requestCode == SHIZUKU_REQ) {
+                    if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                        setStatus("IMLEC: SANAL (SHIZUKU ONAYLANDI)")
+                        val retry = synchronized(lock) {
+                            sessionOn && mode.value != PointerMode.VIRTUAL && backend == null
+                        }
+                        if (retry) {
+                            try {
+                                Thread { sessionStart() }.start()
+                            } catch (_: Exception) {
+                            }
+                        }
+                    } else {
+                        setStatus("IMLEC: SANAL (SHIZUKU ONAYI YOK)")
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun hasBackend(): Boolean {
+        synchronized(lock) {
+            return backend != null
+        }
+    }
+
+    fun setMode(next: PointerMode) {
+        mode.value = next
+        val active = synchronized(lock) { sessionOn }
+        if (!active) {
+            return
+        }
+        if (next == PointerMode.VIRTUAL) {
+            sessionStop()
+        } else {
+            try {
+                Thread { sessionStart() }.start()
+            } catch (_: Exception) {
+                sessionStart()
+            }
+        }
+    }
+
+    fun sessionStart() {
+        synchronized(lock) {
+            sessionOn = true
+            if (backend != null) {
+                return
+            }
+        }
+        if (mode.value == PointerMode.VIRTUAL) {
+            setStatus("IMLEC: SANAL")
+            return
+        }
+        if (startRoot()) {
+            return
+        }
+        if (mode.value == PointerMode.REAL) {
+            maybeAskShizuku()
+            if (startShizuku()) {
+                return
+            }
+            setStatus(shizukuStatus())
+            return
+        }
+        if (startShizuku()) {
+            return
+        }
+        if (!shizukuAlive()) {
+            setStatus("IMLEC: SANAL (KOK YOK)")
+        } else {
+            setStatus(shizukuStatus())
+        }
+    }
+
+    fun sessionStop() {
+        val link = synchronized(lock) {
+            sessionOn = false
+            held.clear()
+            posInit = false
+            accX = 0.0
+            accY = 0.0
+            val old = backend
+            backend = null
+            old
+        }
+        try {
+            link?.close()
+        } catch (_: Exception) {
+        }
+        unbindShizuku()
+        setStatus("IMLEC: SANAL")
+    }
+
+    fun moveAbs(nx: Double, ny: Double, w: Int, h: Int) {
+        val link = synchronized(lock) { backend } ?: return
+        if (w <= 0 || h <= 0) {
+            return
+        }
+        val cx = nx.coerceIn(0.0, 1.0)
+        val cy = ny.coerceIn(0.0, 1.0)
+        var dx = 0
+        var dy = 0
+        synchronized(lock) {
+            if (backend == null) {
+                return
+            }
+            if (!posInit) {
+                posX = cx
+                posY = cy
+                posInit = true
+                return
+            }
+            accX += (cx - posX) * w
+            accY += (cy - posY) * h
+            posX = cx
+            posY = cy
+            dx = accX.toInt()
+            dy = accY.toInt()
+            accX -= dx
+            accY -= dy
+        }
+        if (dx != 0 || dy != 0) {
+            if (!link.write("m " + dx + " " + dy)) {
+                drop(link)
+            }
+        }
+    }
+
+    fun button(code: Int, down: Boolean) {
+        val link = synchronized(lock) { backend } ?: return
+        synchronized(lock) {
+            if (down) {
+                held.add(code)
+            } else {
+                held.remove(code)
+            }
+        }
+        if (!link.write("b " + code + " " + if (down) "1" else "0")) {
+            drop(link)
+        }
+    }
+
+    fun releaseAll() {
+        val codes = synchronized(lock) {
+            val snapshot = held.toList()
+            held.clear()
+            snapshot
+        }
+        if (codes.isEmpty()) {
+            return
+        }
+        val link = synchronized(lock) { backend } ?: return
+        for (code in codes) {
+            link.write("b " + code + " 0")
+        }
+    }
+
+    fun wheel(delta: Int) {
+        if (delta == 0) {
+            return
+        }
+        val link = synchronized(lock) { backend } ?: return
+        if (!link.write("w " + delta)) {
+            drop(link)
+        }
+    }
+
+    private fun setStatus(text: String) {
+        _status.value = text
+    }
+
+    private fun startRoot(): Boolean {
+        if (!rootAvailable()) {
+            return false
+        }
+        dropStaleSock()
+        val context = try {
+            AppGraph.appContext
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        val apk = context.applicationInfo.sourceDir
+        val lib = PointerJni.extractLib(apk, context.filesDir, PRIV_LIB) ?: return false
+        val entry = PointerDaemon::class.java.name
+        val shell = "CLASSPATH=" + apk + " app_process /system/bin " + entry + " " + SOCK_PATH + " " + lib
+        val proc = try {
+            ProcessBuilder("su", "-c", shell).start()
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        val link = waitSocket(proc) ?: return false
+        attach(link, "IMLEC: GERCEK (KOK)")
+        return true
+    }
+
+    private fun startShizuku(): Boolean {
+        if (!shizukuAlive() || !shizukuGranted()) {
+            return false
+        }
+        val context = try {
+            AppGraph.appContext
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        val apk = context.applicationInfo.sourceDir
+        PointerJni.extractLib(apk, File("/data/local/tmp"), "nbpointer_app.so")
+        dropStaleSock()
+        val args = Shizuku.UserServiceArgs(
+            ComponentName(context.packageName, PointerUserService::class.java.name),
+        ).daemon(false).processNameSuffix("pointer").version(appVersion(context)).tag("nbpointer")
+        val latched = CountDownLatch(1)
+        val conn = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                latched.countDown()
+            }
+
+            override fun onServiceDisconnected(name: ComponentName?) {
+            }
+        }
+        try {
+            Shizuku.bindUserService(args, conn)
+        } catch (_: Exception) {
+            return false
+        }
+        try {
+            latched.await(5, TimeUnit.SECONDS)
+        } catch (_: Exception) {
+        }
+        val link = waitSocket(null)
+        if (link == null) {
+            try {
+                Shizuku.unbindUserService(args, conn, true)
+            } catch (_: Exception) {
+            }
+            return false
+        }
+        synchronized(lock) {
+            shizukuArgs = args
+            shizukuConn = conn
+        }
+        attach(link, "IMLEC: GERCEK (SHIZUKU)")
+        return true
+    }
+
+    private fun unbindShizuku() {
+        val pair = synchronized(lock) {
+            val saved = shizukuArgs to shizukuConn
+            shizukuArgs = null
+            shizukuConn = null
+            saved
+        }
+        val args = pair.first
+        val conn = pair.second
+        if (args != null && conn != null) {
+            try {
+                Shizuku.unbindUserService(args, conn, true)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun attach(link: DaemonLink, label: String) {
+        val old = synchronized(lock) {
+            val previous = backend
+            backend = link
+            held.clear()
+            posInit = false
+            posX = 0.0
+            posY = 0.0
+            accX = 0.0
+            accY = 0.0
+            previous
+        }
+        try {
+            old?.close()
+        } catch (_: Exception) {
+        }
+        link.write("m -4096 -4096")
+        link.write("m -4096 -4096")
+        synchronized(lock) {
+            posX = 0.0
+            posY = 0.0
+            posInit = true
+            accX = 0.0
+            accY = 0.0
+        }
+        setStatus(label)
+    }
+
+    private fun drop(link: DaemonLink) {
+        val dead = synchronized(lock) {
+            if (backend === link) {
+                backend = null
+                held.clear()
+                posInit = false
+                link
+            } else {
+                null
+            }
+        }
+        try {
+            dead?.close()
+        } catch (_: Exception) {
+        }
+        if (dead != null) {
+            unbindShizuku()
+            setStatus("IMLEC: SANAL (BAGLANTI KOPTU)")
+        }
+    }
+
+    private fun waitSocket(proc: Process?): DaemonLink? {
+        val deadline = SystemClock.uptimeMillis() + DAEMON_WAIT_MS
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (proc != null) {
+                try {
+                    proc.exitValue()
+                    closeQuiet(proc)
+                    return null
+                } catch (_: IllegalThreadStateException) {
+                }
+            }
+            try {
+                val socket = LocalSocket()
+                socket.connect(
+                    LocalSocketAddress(SOCK_PATH, LocalSocketAddress.Namespace.FILESYSTEM),
+                )
+                return DaemonLink(proc, socket, socket.outputStream.bufferedWriter())
+            } catch (_: Exception) {
+            }
+            try {
+                Thread.sleep(150)
+            } catch (_: Exception) {
+            }
+        }
+        if (proc != null) {
+            closeQuiet(proc)
+        }
+        return null
+    }
+
+    private fun rootAvailable(): Boolean {
+        return try {
+            ProcessBuilder("su", "-c", "exit 0").start().waitFor() == 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun shizukuAlive(): Boolean {
+        return try {
+            Shizuku.pingBinder()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun shizukuGranted(): Boolean {
+        return try {
+            shizukuAlive() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun shizukuStatus(): String {
+        if (!shizukuAlive()) {
+            return "IMLEC: SANAL (SHIZUKU YOK)"
+        }
+        if (!shizukuGranted()) {
+            return "IMLEC: SANAL (SHIZUKU ONAYI YOK)"
+        }
+        return "IMLEC: SANAL (SHIZUKU ERISIM YOK)"
+    }
+
+    private fun maybeAskShizuku() {
+        val ask = synchronized(lock) {
+            if (shizukuAsked) {
+                false
+            } else {
+                shizukuAsked = true
+                true
+            }
+        }
+        if (!ask) {
+            return
+        }
+        try {
+            if (shizukuAlive() && !shizukuGranted()) {
+                Shizuku.requestPermission(SHIZUKU_REQ)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun closeQuiet(proc: Process) {        try {
+            proc.destroy()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun dropStaleSock() {
+        try {
+            File(SOCK_PATH).delete()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun appVersion(context: android.content.Context): Int {
+        return try {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            PackageInfoCompat.getLongVersionCode(info).toInt()
+        } catch (_: Exception) {
+            1
+        }
+    }
+
+    private class DaemonLink(
+        val proc: Process?,
+        val socket: LocalSocket,
+        val out: java.io.BufferedWriter,
+    ) {
+        fun write(line: String): Boolean {
+            return try {
+                out.write(line)
+                out.newLine()
+                out.flush()
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        fun close() {
+            try {
+                write("q")
+            } catch (_: Exception) {
+            }
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
+            try {
+                proc?.destroy()
+            } catch (_: Exception) {
+            }
+        }
+    }
+}

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 pub const AUDIO_QUEUE_CAP: usize = 32;
-pub const JITTER_PREBUFFER: usize = 6;
+pub const JITTER_PREBUFFER: usize = 3;
 pub const JITTER_MAX_CONCEAL: usize = 10;
 
 #[derive(Clone, Debug)]
@@ -200,6 +200,19 @@ mod tests {
         let out = j.next();
         assert!(j.primed());
         assert_eq!(out, tone(7));
+    }
+
+    #[test]
+    fn default_prebuffer_primes_at_three_frames() {
+        let mut j = JitterBuffer::new(32);
+        j.push(tone(7));
+        j.push(tone(7));
+        assert_eq!(j.next(), silence_pcm());
+        assert!(!j.primed());
+        j.push(tone(7));
+        assert_eq!(j.next(), tone(7));
+        assert!(j.primed());
+        assert_eq!(j.stats.played, 1);
     }
 
     #[test]

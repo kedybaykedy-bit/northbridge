@@ -34,6 +34,14 @@ class MirrorInjector {
     @Volatile
     private var lastScrollAt = 0L
 
+    private var dragArmed = false
+    private var dragMoved = false
+    private var dragStartX = 0
+    private var dragStartY = 0
+    private var dragLastX = 0
+    private var dragLastY = 0
+    private var dragDownAt = 0L
+
     fun setScreenSize(width: Int, height: Int) {
         if (width > 0 && height > 0) {
             screenW = width
@@ -46,6 +54,8 @@ class MirrorInjector {
             "tap" -> handleTap(body)
             "click_abs" -> handleTap(body)
             "button" -> handleButton(body)
+            "move" -> handleMove(body)
+            "hover" -> handleHover(body)
             "key" -> handleKey(body)
             "type" -> handleType(body)
             "scroll" -> handleScroll(body)
@@ -53,7 +63,29 @@ class MirrorInjector {
         }
     }
 
+    private fun pointerUp(): Boolean {
+        return NativePointer.hasBackend()
+    }
+
+    private fun pointerMoveTo(nx: Double, ny: Double) {
+        val cx = nx.coerceIn(0.0, 1.0)
+        val cy = ny.coerceIn(0.0, 1.0)
+        lastX = cx
+        lastY = cy
+        NativePointer.moveAbs(cx, cy, screenW, screenH)
+    }
+
     private fun handleTap(body: JsonObject) {
+        if (pointerUp()) {
+            val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+            val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+            if (x != null && y != null) {
+                pointerMoveTo(x, y)
+            }
+            NativePointer.button(NativePointer.BTN_LEFT, true)
+            NativePointer.button(NativePointer.BTN_LEFT, false)
+            return
+        }
         val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
         val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
         if (x != null && y != null) {
@@ -64,19 +96,132 @@ class MirrorInjector {
     }
 
     private fun handleButton(body: JsonObject) {
+        if (pointerUp()) {
+            handlePointerButton(body)
+            return
+        }
         val down = (body["down"] as? JsonPrimitive)?.content == "true"
-        if (!down) return
+        val cancel = (body["cancel"] as? JsonPrimitive)?.content == "true"
+        val name = (body["b"] as? JsonPrimitive)?.content
+        if (name != "left") {
+            if (down && name == "right") {
+                val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+                val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+                if (x != null && y != null) {
+                    lastX = x
+                    lastY = y
+                }
+                longPressAt(lastX, lastY)
+            }
+            return
+        }
+        if (cancel) {
+            disarmDrag()
+            return
+        }
+        if (down) {
+            val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+            val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+            if (x != null && y != null) {
+                lastX = x
+                lastY = y
+            }
+            armDrag(lastX, lastY)
+            return
+        }
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
+        finishDrag(x, y)
+    }
+
+    private fun handlePointerButton(body: JsonObject) {
+        val down = (body["down"] as? JsonPrimitive)?.content == "true"
+        val cancel = (body["cancel"] as? JsonPrimitive)?.content == "true"
+        if (cancel) {
+            NativePointer.releaseAll()
+            return
+        }
+        val code = when ((body["b"] as? JsonPrimitive)?.content) {
+            "left" -> NativePointer.BTN_LEFT
+            "right" -> NativePointer.BTN_RIGHT
+            "middle" -> NativePointer.BTN_MIDDLE
+            else -> null
+        }
+        if (code == null) {
+            return
+        }
         val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
         val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
         if (x != null && y != null) {
-            lastX = x
-            lastY = y
+            pointerMoveTo(x, y)
         }
-        when ((body["b"] as? JsonPrimitive)?.content) {
-            "left" -> tapAt(lastX, lastY)
-            "right" -> longPressAt(lastX, lastY)
-            else -> Unit
+        NativePointer.button(code, down)
+    }
+
+    private fun handleHover(body: JsonObject) {
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull ?: return
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull ?: return
+        if (!pointerUp()) {
+            lastX = x.coerceIn(0.0, 1.0)
+            lastY = y.coerceIn(0.0, 1.0)
+            return
         }
+        pointerMoveTo(x, y)
+    }
+
+    private fun handleMove(body: JsonObject) {
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull ?: return
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull ?: return
+        if (pointerUp()) {
+            pointerMoveTo(x, y)
+            return
+        }
+        if (!dragArmed) return
+        lastX = x.coerceIn(0.0, 1.0)
+        lastY = y.coerceIn(0.0, 1.0)
+        dragLastX = (lastX * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
+        dragLastY = (lastY * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
+        val dx = dragLastX - dragStartX
+        val dy = dragLastY - dragStartY
+        if (dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
+            dragMoved = true
+        }
+    }
+
+    private fun armDrag(nx: Double, ny: Double) {
+        val cx = nx.coerceIn(0.0, 1.0)
+        val cy = ny.coerceIn(0.0, 1.0)
+        dragArmed = true
+        dragMoved = false
+        dragStartX = (cx * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
+        dragStartY = (cy * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
+        dragLastX = dragStartX
+        dragLastY = dragStartY
+        dragDownAt = System.currentTimeMillis()
+    }
+
+    private fun disarmDrag() {
+        dragArmed = false
+        dragMoved = false
+    }
+
+    private fun finishDrag(nx: Double?, ny: Double?) {
+        if (!dragArmed) return
+        dragArmed = false
+        val fx = ((nx ?: lastX).coerceIn(0.0, 1.0) * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
+        val fy = ((ny ?: lastY).coerceIn(0.0, 1.0) * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
+        lastX = (fx.toDouble() / (screenW - 1).coerceAtLeast(1).toDouble()).coerceIn(0.0, 1.0)
+        lastY = (fy.toDouble() / (screenH - 1).coerceAtLeast(1).toDouble()).coerceIn(0.0, 1.0)
+        if (!dragMoved) {
+            dragMoved = false
+            runCommand("input tap " + fx + " " + fy)
+            return
+        }
+        dragMoved = false
+        val elapsed = (System.currentTimeMillis() - dragDownAt).coerceIn(120L, 2500L)
+        runCommand(
+            "input swipe " + dragStartX + " " + dragStartY + " " + fx + " " + fy + " " + elapsed,
+        )
     }
 
     private fun handleKey(body: JsonObject) {
@@ -102,6 +247,12 @@ class MirrorInjector {
         val dx = (body["dx"] as? JsonPrimitive)?.doubleOrNull ?: 0.0
         val dy = (body["dy"] as? JsonPrimitive)?.doubleOrNull ?: 0.0
         if (dx == 0.0 && dy == 0.0) return
+        if (pointerUp()) {
+            if (dy != 0.0) {
+                NativePointer.wheel(-dy.toInt())
+            }
+            return
+        }
         val cx = (lastX * (screenW - 1)).toInt().coerceIn(0, screenW - 1)
         val cy = (lastY * (screenH - 1)).toInt().coerceIn(0, screenH - 1)
         val travel = 200
@@ -211,6 +362,7 @@ class MirrorInjector {
 
     private companion object {
         const val SCROLL_THROTTLE_MS = 120L
+        const val DRAG_THRESHOLD_PX = 16
         const val TYPE_ALLOWED = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,?!_-'\""
 
         val EVDEV_TO_ANDROID: Map<Int, Int> = buildMap {

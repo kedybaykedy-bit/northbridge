@@ -1,8 +1,11 @@
 package bit.kedybaykedy.northbridge.ui.screen
 
+import android.app.Activity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,11 +16,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -32,9 +40,14 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlin.math.tan
 
@@ -187,6 +200,82 @@ private fun Masthead(alias: String, stateLabel: String) {
 }
 
 @Composable
+private fun FullscreenViewer(
+    frame: bit.kedybaykedy.northbridge.transport.ScreenFrame?,
+    meta: String,
+    mono: Boolean,
+    onClose: () -> Unit,
+) {
+    val monoFilter = remember {
+        ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Black),
+        ) {
+            val image = frame?.image
+            if (image != null) {
+                Image(
+                    bitmap = image,
+                    contentDescription = "Masaüstü akışı",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit,
+                    colorFilter = if (mono) monoFilter else null,
+                )
+            } else {
+                HalftoneBand(Modifier.fillMaxSize())
+            }
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(start = 12.dp, top = 12.dp)
+                    .background(Panel)
+                    .border(1.5.dp, White)
+                    .clickable(onClick = onClose)
+                    .padding(horizontal = 18.dp, vertical = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "KAPAT",
+                    style = TextStyle(
+                        fontSize = 14.sp,
+                        letterSpacing = 2.sp,
+                        color = White,
+                    ),
+                )
+            }
+            if (meta.isNotEmpty()) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 16.dp)
+                        .background(Panel)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        text = meta,
+                        style = TextStyle(
+                            fontSize = 11.sp,
+                            letterSpacing = 1.sp,
+                            color = Gray6,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun ScreenScreen(viewModel: ScreenViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsState()
     val frame by viewModel.frame.collectAsState()
@@ -194,6 +283,34 @@ fun ScreenScreen(viewModel: ScreenViewModel = viewModel()) {
     val alias by viewModel.deviceAlias.collectAsState()
     val mono by viewModel.mono.collectAsState()
     val error by viewModel.error.collectAsState()
+    var fullscreen by rememberSaveable { mutableStateOf(false) }
+
+    val activity = LocalContext.current as? Activity
+    DisposableEffect(fullscreen, activity) {
+        val window = activity?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        if (fullscreen) {
+            controller?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+    BackHandler(enabled = fullscreen) {
+        fullscreen = false
+    }
+    if (fullscreen) {
+        FullscreenViewer(
+            frame = frame,
+            meta = meta,
+            mono = mono,
+            onClose = { fullscreen = false },
+        )
+    }
 
     val stateLabel = when (uiState) {
         ScreenUiState.LIVE -> "AKIŞ"
@@ -305,6 +422,14 @@ fun ScreenScreen(viewModel: ScreenViewModel = viewModel()) {
             )
         }
         Spacer(Modifier.height(12.dp))
+        SkewButton(
+            label = "TAM EKRAN",
+            primary = false,
+            enabled = frame != null,
+            onClick = { fullscreen = true },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(10.dp))
         SkewButton(
             label = if (mono) "GRİ TON: AÇIK" else "GRİ TON: KAPALI",
             primary = false,

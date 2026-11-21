@@ -12,7 +12,8 @@ pub use control::{
 pub use decode::{DecodedFrame, H264Decoder, rgba_to_bgra_in_place};
 pub use display::{MirrorWindow, TITLE};
 pub use events::{
-    KeyAction, button_name, key_action, keysym_to_char, normalize_coord, scroll_delta,
+    DragRelease, DragTracker, KeyAction, button_cancel_packet, button_down_packet, button_name,
+    button_up_packet, key_action, keysym_to_char, move_packet, normalize_coord, scroll_delta,
     xkey_to_evdev,
 };
 pub use frame::{CODEC_H264, HEADER_LEN, MAGIC, MAX_PAYLOAD, VERSION, FrameMeta, build_header, parse_header};

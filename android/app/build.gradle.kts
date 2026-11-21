@@ -8,6 +8,7 @@ plugins {
 android {
     namespace = "bit.kedybaykedy.northbridge"
     compileSdk = 35
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "bit.kedybaykedy.northbridge"
@@ -15,6 +16,17 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -68,5 +80,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.bcprov)
     implementation(libs.bcpkix)
+    implementation("dev.rikka.shizuku:api:13.1.5")
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

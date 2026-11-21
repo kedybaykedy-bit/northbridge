@@ -42,6 +42,19 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="persistent_device_link" />
         </service>
+
+        <service
+            android:name=".input.PointerUserService"
+            android:exported="true" />
+
+        <service
+            android:name=".keepalive.PacketKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="persistent_device_link" />
+        </service>
     </application>
 
 </manifest>

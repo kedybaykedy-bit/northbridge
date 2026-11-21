@@ -109,6 +109,7 @@ impl MirrorWindow {
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
             | EventMask::POINTER_MOTION
+            | EventMask::BUTTON_MOTION
             | EventMask::KEY_PRESS
             | EventMask::KEY_RELEASE
             | EventMask::FOCUS_CHANGE

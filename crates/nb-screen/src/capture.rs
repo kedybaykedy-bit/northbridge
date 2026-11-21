@@ -13,6 +13,12 @@ pub enum Strategy {
     Shm,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplaySelector {
+    Default,
+    Index(usize),
+}
+
 pub struct RawFrame {
     pub width: u32,
     pub height: u32,
@@ -30,11 +36,23 @@ pub struct Grabber {
 
 impl Grabber {
     pub fn connect(strategy: Strategy) -> Result<Self> {
-        let (conn, screen_num) = RustConnection::connect(None).context("X display")?;
-        let screen = &conn.setup().roots[screen_num];
-        let root = screen.root;
-        let width = u32::from(screen.width_in_pixels);
-        let height = u32::from(screen.height_in_pixels);
+        Self::connect_display(strategy, DisplaySelector::Default)
+    }
+
+    pub fn connect_display(strategy: Strategy, display: DisplaySelector) -> Result<Self> {
+        let (conn, default_screen) = RustConnection::connect(None).context("X display")?;
+        let num = match display {
+            DisplaySelector::Default => default_screen,
+            DisplaySelector::Index(i) => i,
+        };
+        let info = conn
+            .setup()
+            .roots
+            .get(num)
+            .context("display index out of range")?;
+        let root = info.root;
+        let width = u32::from(info.width_in_pixels);
+        let height = u32::from(info.height_in_pixels);
         if width == 0 || height == 0 {
             anyhow::bail!("empty screen geometry");
         }

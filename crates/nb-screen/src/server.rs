@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
+use crate::adapt::AdaptState;
 use crate::capture::{self, Grabber, Strategy};
 use crate::control::{DEFAULT_FPS, DEFAULT_MAX_W, FRAME_OPEN_KIND};
 use crate::frame::{self, FrameMeta};
@@ -330,19 +331,23 @@ fn spawn_capture(
             let server = ScreenServer {
                 inner: inner.clone(),
             };
-            let interval = Duration::from_secs_f32(1.0 / f32::from(fps.max(1)));
+            let mut adapt = AdaptState::new(JPEG_QUALITY, fps);
+            let mut logged_frames: u64 = 0;
+            let mut window_work = Duration::ZERO;
+            let mut window_congested: u64 = 0;
             loop {
                 if !server.matches(generation, &peer_fp) {
                     break;
                 }
                 let tick = std::time::Instant::now();
-                match capture::grab_scaled(&grabber, max_w)
-                    .and_then(|(w, h, bgra)| {
-                        capture::to_jpeg_bgra(&bgra, w, h, JPEG_QUALITY)
-                            .map(|jpeg| (w, h, jpeg))
-                    }) {
+                let budget = adapt.interval();
+                let mut congested = false;
+                match capture::grab_scaled(&grabber, max_w).and_then(|(w, h, bgra)| {
+                    capture::to_jpeg_bgra(&bgra, w, h, adapt.quality())
+                        .map(|jpeg| (w, h, jpeg))
+                }) {
                     Ok((w, h, jpeg)) => {
-                        queue.lock().unwrap().push(QueuedFrame {
+                        congested = queue.lock().unwrap().push(QueuedFrame {
                             width: w as u16,
                             height: h as u16,
                             data: jpeg,
@@ -350,7 +355,25 @@ fn spawn_capture(
                     }
                     Err(e) => eprintln!("[screen] capture: {e:#}"),
                 }
+                let work = tick.elapsed();
+                adapt.note_frame(work, budget, congested);
+                logged_frames += 1;
+                window_work += work;
+                if congested {
+                    window_congested += 1;
+                }
+                if logged_frames % 60 == 0 {
+                    eprintln!(
+                        "[screen] cadence n={logged_frames} q={} fps={} avg_work_ms={} congested={window_congested}",
+                        adapt.quality(),
+                        adapt.fps(),
+                        window_work.as_millis() / 60,
+                    );
+                    window_work = Duration::ZERO;
+                    window_congested = 0;
+                }
                 let elapsed = tick.elapsed();
+                let interval = adapt.interval();
                 if elapsed < interval {
                     std::thread::sleep(interval - elapsed);
                 }
