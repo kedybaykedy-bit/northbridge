@@ -1,7 +1,7 @@
 use crate::backend::Backend;
 use crate::model::{
-    DeviceView, Flow, GuiCmd, InboundPair, LogBuf, OpKind, SelfInfo, UiEvent, age_string, dial_label,
-    fp_short, now_secs, primary_channel, LOG_CAP,
+    AppEntry, DeviceView, Flow, GuiCmd, InboundPair, LogBuf, OpKind, SelfInfo, UiEvent, age_string,
+    dial_label, filter_apps, fp_short, now_secs, primary_channel, LOG_CAP,
 };
 use crate::theme;
 use tokio::sync::mpsc::UnboundedSender;
@@ -20,8 +20,20 @@ pub struct GuiApp {
     ping_flow: Flow,
     send_flow: Flow,
     clip_flow: Flow,
+    wake_flow: Flow,
+    open_flow: Flow,
+    apps_flow: Flow,
+    sleep_flow: Flow,
+    keep_flow: Flow,
+    keep_on: bool,
     send_paths: String,
     clip_text: String,
+    apps: Vec<AppEntry>,
+    apps_total: u64,
+    apps_truncated: bool,
+    apps_target: Option<String>,
+    apps_filter: String,
+    selected_app: Option<String>,
     inbound: Option<InboundPair>,
     started: bool,
 }
@@ -42,8 +54,20 @@ impl GuiApp {
             ping_flow: Flow::Idle,
             send_flow: Flow::Idle,
             clip_flow: Flow::Idle,
+            wake_flow: Flow::Idle,
+            open_flow: Flow::Idle,
+            apps_flow: Flow::Idle,
+            sleep_flow: Flow::Idle,
+            keep_flow: Flow::Idle,
+            keep_on: false,
             send_paths: String::new(),
             clip_text: String::new(),
+            apps: Vec::new(),
+            apps_total: 0,
+            apps_truncated: false,
+            apps_target: None,
+            apps_filter: String::new(),
+            selected_app: None,
             inbound: None,
             started: false,
         }
@@ -58,8 +82,23 @@ impl GuiApp {
         crate::model::find_device(&self.devices, fp)
     }
 
+    fn clear_device_state(&mut self) {
+        self.apps.clear();
+        self.apps_total = 0;
+        self.apps_truncated = false;
+        self.apps_target = None;
+        self.selected_app = None;
+        self.apps_filter.clear();
+        self.wake_flow.reset();
+        self.open_flow.reset();
+        self.apps_flow.reset();
+        self.sleep_flow.reset();
+        self.keep_flow.reset();
+        self.keep_on = false;
+    }
+
     fn drain_events(&mut self) {
-        for _ in 0..200 {
+        for _ in 0..300 {
             match self.events.try_recv() {
                 Ok(UiEvent::Log(line)) => self.log.push(line),
                 Ok(UiEvent::Peers(devices)) => {
@@ -67,6 +106,7 @@ impl GuiApp {
                     if let Some(fp) = self.selected.clone() {
                         if !self.devices.iter().any(|d| d.fingerprint == fp) {
                             self.selected = None;
+                            self.clear_device_state();
                         }
                     }
                 }
@@ -76,10 +116,35 @@ impl GuiApp {
                         OpKind::Ping => &mut self.ping_flow,
                         OpKind::Send => &mut self.send_flow,
                         OpKind::Clipboard => &mut self.clip_flow,
+                        OpKind::Wake => &mut self.wake_flow,
+                        OpKind::Open => &mut self.open_flow,
+                        OpKind::Apps => &mut self.apps_flow,
+                        OpKind::Sleep => &mut self.sleep_flow,
+                        OpKind::KeepAwake => &mut self.keep_flow,
                     };
                     flow.finish(&target, ok, detail.clone());
                     if !ok {
                         self.log.push(format!("[{}] {target} — {detail}", op.label()));
+                    }
+                    if op == OpKind::KeepAwake && !ok {
+                        self.keep_on = false;
+                    }
+                }
+                Ok(UiEvent::AppsList {
+                    target,
+                    ok,
+                    detail,
+                    apps,
+                    total,
+                    truncated,
+                }) => {
+                    self.apps = apps;
+                    self.apps_total = total;
+                    self.apps_truncated = truncated;
+                    self.apps_target = Some(target);
+                    self.selected_app = None;
+                    if !ok {
+                        self.log.push(format!("[APPS] {detail}"));
                     }
                 }
                 Ok(UiEvent::InboundPair(p)) => self.inbound = Some(p),
@@ -90,6 +155,11 @@ impl GuiApp {
                         self.ping_flow.reset();
                         self.send_flow.reset();
                         self.clip_flow.reset();
+                        self.wake_flow.reset();
+                        self.open_flow.reset();
+                        self.apps_flow.reset();
+                        self.sleep_flow.reset();
+                        self.keep_flow.reset();
                     }
                 }
                 Ok(UiEvent::SelfInfo(info)) => self.self_info = Some(info),
@@ -160,7 +230,7 @@ impl GuiApp {
                 if self.devices.is_empty() {
                     theme::band_frame().show(ui, |ui| {
                         ui.label(theme::body("No devices yet."));
-                        ui.label(theme::meta("Peers appear here while discovery runs. Start `northbridge listen` on the other side."));
+                        ui.label(theme::meta("Peers appear here while discovery runs."));
                     });
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -200,7 +270,10 @@ impl GuiApp {
                         }
                     }
                     if let Some(fp) = pick {
-                        self.selected = Some(fp);
+                        if self.selected.as_ref() != Some(&fp) {
+                            self.selected = Some(fp);
+                            self.clear_device_state();
+                        }
                     }
                 });
                 ui.add_space(6.0);
@@ -217,6 +290,127 @@ impl GuiApp {
             });
     }
 
+    fn remote_controls(&mut self, ui: &mut egui::Ui, sel: DeviceView) {
+        ui.label(theme::kicker("uzaktan kumanda · remote"));
+        ui.horizontal(|ui| {
+            let wake_on = self.daemon_running && sel.trusted && !self.wake_flow.is_working();
+            if ui.add_enabled(wake_on, egui::Button::new(theme::chip("UYANDIR"))).clicked() {
+                self.wake_flow.start(&sel.alias);
+                self.send(GuiCmd::Wake {
+                    fingerprint: sel.fingerprint.clone(),
+                });
+            }
+            let sleep_on = self.daemon_running && sel.trusted && !self.sleep_flow.is_working();
+            if ui.add_enabled(sleep_on, egui::Button::new(theme::chip("UYUT"))).clicked() {
+                self.sleep_flow.start(&sel.alias);
+                self.send(GuiCmd::Sleep {
+                    fingerprint: sel.fingerprint.clone(),
+                });
+            }
+        });
+        ui.label(theme::meta(&self.wake_flow.summary()));
+        ui.label(theme::meta(&self.sleep_flow.summary()));
+        ui.horizontal(|ui| {
+            let mut next = self.keep_on;
+            let keep_enabled = self.daemon_running && sel.trusted && !self.keep_flow.is_working();
+            ui.add_enabled(keep_enabled, egui::Checkbox::new(&mut next, theme::body("EKRANI ACIK TUT")));
+            if next != self.keep_on && keep_enabled {
+                self.keep_on = next;
+                self.keep_flow.start(&sel.alias);
+                self.send(GuiCmd::KeepAwake {
+                    fingerprint: sel.fingerprint.clone(),
+                    on: next,
+                });
+            }
+            ui.label(theme::meta(&self.keep_flow.summary()));
+        });
+        if !sel.trusted {
+            ui.label(theme::meta("Pair first — remote controls need trust."));
+        }
+    }
+
+    fn apps_pane(&mut self, ui: &mut egui::Ui, sel: DeviceView) {
+        ui.add_space(4.0);
+        ui.label(theme::kicker("uygulama · apps"));
+        ui.horizontal(|ui| {
+            let fetch_on = self.daemon_running && sel.trusted && !self.apps_flow.is_working();
+            if ui.add_enabled(fetch_on, egui::Button::new(theme::chip("UYGULAMALARI GETIR"))).clicked() {
+                self.apps_flow.start(&sel.alias);
+                self.send(GuiCmd::FetchApps {
+                    fingerprint: sel.fingerprint.clone(),
+                });
+            }
+            ui.label(theme::meta(&self.apps_flow.summary()));
+        });
+        if let Some(target) = self.apps_target.clone() {
+            let mut head = format!("{} uygulama", self.apps.len());
+            if self.apps_truncated {
+                head = format!("{} (toplam {} — daraltilmis)", self.apps.len(), self.apps_total);
+            } else if self.apps_total as usize != self.apps.len() {
+                head = format!("{} (toplam {})", self.apps.len(), self.apps_total);
+            }
+            ui.label(theme::meta(&format!("{target} · {head}")));
+        }
+        ui.horizontal(|ui| {
+            ui.label(theme::meta("filtre"));
+            ui.text_edit_singleline(&mut self.apps_filter);
+        });
+        let shown: Vec<AppEntry> = filter_apps(&self.apps, &self.apps_filter)
+            .into_iter()
+            .cloned()
+            .collect();
+        if self.apps.is_empty() {
+            ui.label(theme::meta("Liste bos — UYGULAMALARI GETIR ile doldur."));
+        } else if shown.is_empty() {
+            ui.label(theme::meta("Filtreye uyan uygulama yok."));
+        } else {
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    let mut pick: Option<String> = None;
+                    for entry in shown {
+                        let active = self.selected_app.as_ref() == Some(&entry.pkg);
+                        let row = theme::mini_frame().show(ui, |ui| {
+                            ui.label(theme::body(&entry.label));
+                            ui.label(theme::mono(&entry.pkg));
+                        });
+                        if ui.interact(
+                            row.response.rect,
+                            egui::Id::unique(("nbapp", &entry.pkg)),
+                            egui::Sense::click(),
+                        ).clicked() {
+                            pick = Some(entry.pkg.clone());
+                        }
+                        if active {
+                            ui.label(theme::meta("secili"));
+                        }
+                    }
+                    if let Some(pkg) = pick {
+                        self.selected_app = Some(pkg);
+                    }
+                });
+            ui.horizontal(|ui| {
+                let open_on = self.daemon_running
+                    && sel.trusted
+                    && self.selected_app.is_some()
+                    && !self.open_flow.is_working();
+                if ui.add_enabled(open_on, egui::Button::new(theme::chip("AC"))).clicked() {
+                    if let Some(pkg) = self.selected_app.clone() {
+                        self.open_flow.start(&pkg);
+                        self.send(GuiCmd::Open {
+                            fingerprint: sel.fingerprint.clone(),
+                            package: pkg,
+                        });
+                    }
+                }
+                if let Some(pkg) = self.selected_app.clone() {
+                    ui.label(theme::mono(&pkg));
+                }
+                ui.label(theme::meta(&self.open_flow.summary()));
+            });
+        }
+    }
+
     fn action_pane(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.label(theme::kicker("eylemler · actions"));
@@ -224,52 +418,57 @@ impl GuiApp {
             ui.add_space(4.0);
             if let Some(sel) = self.selected_device().cloned() {
                 theme::paper_frame().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(theme::body(&sel.alias));
-                        ui.label(theme::meta(&format!(
-                            "{} · {}",
-                            fp_short(&sel.fingerprint),
-                            if sel.trusted { "trusted" } else { "not paired" }
-                        )));
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        let ping_on = self.daemon_running && !self.ping_flow.is_working();
-                        if ui.add_enabled(ping_on, egui::Button::new(theme::chip("PING"))).clicked() {
-                            self.ping_flow.start(&sel.alias);
-                            self.send(GuiCmd::Ping { fingerprint: sel.fingerprint.clone() });
-                        }
-                        ui.label(theme::meta(&self.ping_flow.summary()));
-                    });
-                    ui.add_space(4.0);
-                    ui.label(theme::kicker("send files"));
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.send_paths);
-                    });
-                    ui.label(theme::meta("Absolute paths, separated by spaces."));
-                    ui.horizontal(|ui| {
-                        let send_on = self.daemon_running && !self.send_flow.is_working() && !self.send_paths.trim().is_empty();
-                        if ui.add_enabled(send_on, egui::Button::new(theme::chip("SEND FILES"))).clicked() {
-                            let paths: Vec<String> =
-                                self.send_paths.split_whitespace().map(String::from).collect();
-                            self.send_flow.start(&sel.alias);
-                            self.send(GuiCmd::SendFiles { fingerprint: sel.fingerprint.clone(), paths });
-                        }
-                        ui.label(theme::meta(&self.send_flow.summary()));
-                    });
-                    ui.add_space(4.0);
-                    ui.label(theme::kicker("push clipboard"));
-                    ui.text_edit_multiline(&mut self.clip_text);
-                    ui.horizontal(|ui| {
-                        let clip_on = self.daemon_running && !self.clip_flow.is_working() && !self.clip_text.is_empty();
-                        if ui.add_enabled(clip_on, egui::Button::new(theme::chip("PUSH CLIPBOARD"))).clicked() {
-                            self.clip_flow.start(&sel.alias);
-                            self.send(GuiCmd::PushClipboard {
-                                fingerprint: sel.fingerprint.clone(),
-                                text: self.clip_text.clone(),
-                            });
-                        }
-                        ui.label(theme::meta(&self.clip_flow.summary()));
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(theme::body(&sel.alias));
+                            ui.label(theme::meta(&format!(
+                                "{} · {}",
+                                fp_short(&sel.fingerprint),
+                                if sel.trusted { "trusted" } else { "not paired" }
+                            )));
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let ping_on = self.daemon_running && !self.ping_flow.is_working();
+                            if ui.add_enabled(ping_on, egui::Button::new(theme::chip("PING"))).clicked() {
+                                self.ping_flow.start(&sel.alias);
+                                self.send(GuiCmd::Ping { fingerprint: sel.fingerprint.clone() });
+                            }
+                            ui.label(theme::meta(&self.ping_flow.summary()));
+                        });
+                        ui.add_space(4.0);
+                        ui.label(theme::kicker("send files"));
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut self.send_paths);
+                        });
+                        ui.label(theme::meta("Absolute paths, separated by spaces."));
+                        ui.horizontal(|ui| {
+                            let send_on = self.daemon_running && !self.send_flow.is_working() && !self.send_paths.trim().is_empty();
+                            if ui.add_enabled(send_on, egui::Button::new(theme::chip("SEND FILES"))).clicked() {
+                                let paths: Vec<String> =
+                                    self.send_paths.split_whitespace().map(String::from).collect();
+                                self.send_flow.start(&sel.alias);
+                                self.send(GuiCmd::SendFiles { fingerprint: sel.fingerprint.clone(), paths });
+                            }
+                            ui.label(theme::meta(&self.send_flow.summary()));
+                        });
+                        ui.add_space(4.0);
+                        ui.label(theme::kicker("push clipboard"));
+                        ui.text_edit_multiline(&mut self.clip_text);
+                        ui.horizontal(|ui| {
+                            let clip_on = self.daemon_running && !self.clip_flow.is_working() && !self.clip_text.is_empty();
+                            if ui.add_enabled(clip_on, egui::Button::new(theme::chip("PUSH CLIPBOARD"))).clicked() {
+                                self.clip_flow.start(&sel.alias);
+                                self.send(GuiCmd::PushClipboard {
+                                    fingerprint: sel.fingerprint.clone(),
+                                    text: self.clip_text.clone(),
+                                });
+                            }
+                            ui.label(theme::meta(&self.clip_flow.summary()));
+                        });
+                        ui.add_space(4.0);
+                        self.remote_controls(ui, sel.clone());
+                        self.apps_pane(ui, sel);
                     });
                 });
             } else {
@@ -293,7 +492,7 @@ impl GuiApp {
             theme::band_frame().show(ui, |ui| {
                 ui.label(theme::kicker("services"));
                 ui.label(theme::body("Embedded in this window: packet server · file receive · clipboard sync · discovery."));
-                ui.label(theme::meta("Screen / audio / mirror streaming stay in `northbridge listen` (CLI) for now."));
+                ui.label(theme::meta("Screen and audio streaming stay in listen (CLI) for now."));
             });
         });
     }

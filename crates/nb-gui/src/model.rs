@@ -43,6 +43,11 @@ pub enum OpKind {
     Ping,
     Send,
     Clipboard,
+    Wake,
+    Open,
+    Apps,
+    Sleep,
+    KeepAwake,
 }
 
 impl OpKind {
@@ -52,6 +57,11 @@ impl OpKind {
             OpKind::Ping => "PING",
             OpKind::Send => "SEND",
             OpKind::Clipboard => "CLIPBOARD",
+            OpKind::Wake => "WAKE",
+            OpKind::Open => "OPEN",
+            OpKind::Apps => "APPS",
+            OpKind::Sleep => "SLEEP",
+            OpKind::KeepAwake => "KEEPAWAKE",
         }
     }
 }
@@ -103,6 +113,12 @@ impl Flow {
 }
 
 #[derive(Clone, Debug)]
+pub struct AppEntry {
+    pub pkg: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
 pub enum UiEvent {
     Log(String),
     Peers(Vec<DeviceView>),
@@ -111,6 +127,14 @@ pub enum UiEvent {
         target: String,
         ok: bool,
         detail: String,
+    },
+    AppsList {
+        target: String,
+        ok: bool,
+        detail: String,
+        apps: Vec<AppEntry>,
+        total: u64,
+        truncated: bool,
     },
     InboundPair(InboundPair),
     DaemonStatus { running: bool },
@@ -128,6 +152,146 @@ pub enum GuiCmd {
     SetAutoPair(bool),
     StartDaemon,
     StopDaemon,
+    Wake { fingerprint: String },
+    Open { fingerprint: String, package: String },
+    FetchApps { fingerprint: String },
+    Sleep { fingerprint: String },
+    KeepAwake { fingerprint: String, on: bool },
+}
+
+pub fn valid_package(pkg: &str) -> bool {
+    !pkg.is_empty()
+        && pkg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
+pub fn yesno(body: &serde_json::Value, key: &str) -> &'static str {
+    match body.get(key).and_then(|v| v.as_bool()) {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "?",
+    }
+}
+
+pub fn control_ok_body(body: &serde_json::Value) -> Result<&serde_json::Value, String> {
+    if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(body)
+    } else {
+        let reason = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("device refused");
+        let action = body
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        Err(format!("{action} failed: {reason}"))
+    }
+}
+
+pub fn secure_note(body: &serde_json::Value) -> Option<String> {
+    if let Some(note) = body.get("note").and_then(|v| v.as_str()) {
+        if !note.is_empty() {
+            return Some(note.to_string());
+        }
+    }
+    if body.get("secure").and_then(|v| v.as_bool()) == Some(true) {
+        return Some("secure lock active — unlock on the phone".to_string());
+    }
+    None
+}
+
+pub fn wake_detail(body: &serde_json::Value) -> String {
+    let mut out = format!(
+        "awake: {} keyguard: {}",
+        yesno(body, "awake"),
+        yesno(body, "keyguard")
+    );
+    if let Some(note) = secure_note(body) {
+        out.push_str(&format!(" — {note}"));
+    }
+    out
+}
+
+pub fn open_detail(body: &serde_json::Value, package: &str) -> String {
+    let component = body
+        .get("component")
+        .and_then(|v| v.as_str())
+        .unwrap_or(package);
+    let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("?");
+    let mut out = format!(
+        "started {component} via {method} (awake: {} keyguard: {})",
+        yesno(body, "awake"),
+        yesno(body, "keyguard")
+    );
+    if let Some(note) = secure_note(body) {
+        out.push_str(&format!(" — {note}"));
+    }
+    out
+}
+
+pub fn sleep_detail(body: &serde_json::Value) -> String {
+    format!("display off (awake: {})", yesno(body, "awake"))
+}
+
+pub fn keepawake_detail(on: bool) -> String {
+    if on {
+        "keepawake on — display held awake".to_string()
+    } else {
+        "keepawake off — previous display policy restored".to_string()
+    }
+}
+
+pub fn apps_summary(total: u64, truncated: bool) -> String {
+    if truncated {
+        format!("{total} launchable app(s) (truncated)")
+    } else {
+        format!("{total} launchable app(s)")
+    }
+}
+
+pub fn parse_apps(body: &serde_json::Value) -> (Vec<AppEntry>, u64, bool) {
+    let mut apps: Vec<AppEntry> = body
+        .get("apps")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    let pkg = e.get("pkg")?.as_str()?.to_string();
+                    let label = e.get("label")?.as_str()?.to_string();
+                    Some(AppEntry { pkg, label })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    apps.sort_by(|a, b| {
+        a.label
+            .to_lowercase()
+            .cmp(&b.label.to_lowercase())
+            .then(a.pkg.cmp(&b.pkg))
+    });
+    let total = body
+        .get("total")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(apps.len() as u64);
+    let truncated = body
+        .get("truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    (apps, total, truncated)
+}
+
+pub fn filter_apps<'a>(apps: &'a [AppEntry], query: &str) -> Vec<&'a AppEntry> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return apps.iter().collect();
+    }
+    apps.iter()
+        .filter(|e| {
+            e.label.to_lowercase().contains(&q) || e.pkg.to_lowercase().contains(&q)
+        })
+        .collect()
 }
 
 pub fn fp_short(fp: &str) -> String {
@@ -390,9 +554,94 @@ mod tests {
 
     #[test]
     fn op_labels_are_uppercase() {
-        for op in [OpKind::Pair, OpKind::Ping, OpKind::Send, OpKind::Clipboard] {
+        for op in [
+            OpKind::Pair,
+            OpKind::Ping,
+            OpKind::Send,
+            OpKind::Clipboard,
+            OpKind::Wake,
+            OpKind::Open,
+            OpKind::Apps,
+            OpKind::Sleep,
+            OpKind::KeepAwake,
+        ] {
             let l = op.label();
             assert_eq!(l, l.to_uppercase());
         }
+    }
+
+    #[test]
+    fn package_names_validate_like_cli() {
+        assert!(valid_package("com.android.settings"));
+        assert!(valid_package("com.example_app1"));
+        assert!(!valid_package(""));
+        assert!(!valid_package("com.example;rm"));
+        assert!(!valid_package("pkg with space"));
+        assert!(!valid_package("pkg/slash"));
+    }
+
+    #[test]
+    fn control_ok_accepts_and_rejects() {
+        let good = serde_json::json!({"ok": true, "awake": true});
+        assert!(control_ok_body(&good).is_ok());
+        let bad = serde_json::json!({"ok": false, "action": "open", "error": "no launcher"});
+        let err = control_ok_body(&bad).unwrap_err();
+        assert!(err.contains("open"));
+        assert!(err.contains("no launcher"));
+    }
+
+    #[test]
+    fn wake_detail_reports_state_and_note() {
+        let body = serde_json::json!({"ok": true, "awake": true, "keyguard": false});
+        let d = wake_detail(&body);
+        assert!(d.contains("awake: yes"));
+        assert!(d.contains("keyguard: no"));
+        let locked = serde_json::json!({"ok": true, "awake": false, "keyguard": true, "secure": true, "note": "unlock on the phone"});
+        let d2 = wake_detail(&locked);
+        assert!(d2.contains("awake: no"));
+        assert!(d2.contains("unlock on the phone"));
+        assert!(secure_note(&locked).is_some());
+        assert!(secure_note(&body).is_none());
+    }
+
+    #[test]
+    fn open_detail_mentions_component_and_method() {
+        let body = serde_json::json!({"ok": true, "component": "com.a/.Main", "method": "am", "awake": true, "keyguard": false});
+        let d = open_detail(&body, "com.a");
+        assert!(d.contains("com.a/.Main"));
+        assert!(d.contains("am"));
+    }
+
+    #[test]
+    fn sleep_and_keepawake_details() {
+        let body = serde_json::json!({"ok": true, "awake": false});
+        assert!(sleep_detail(&body).contains("display off"));
+        assert!(keepawake_detail(true).contains("on"));
+        assert!(keepawake_detail(false).contains("off"));
+        assert!(apps_summary(5, false).contains('5'));
+        assert!(apps_summary(300, true).contains("truncated"));
+    }
+
+    #[test]
+    fn apps_parse_sorts_and_filters() {
+        let body = serde_json::json!({
+            "ok": true,
+            "total": 2,
+            "truncated": false,
+            "apps": [
+                {"pkg": "com.zebra", "label": "Zebra"},
+                {"pkg": "com.apple", "label": "Apple"}
+            ]
+        });
+        let (apps, total, truncated) = parse_apps(&body);
+        assert_eq!(total, 2);
+        assert!(!truncated);
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].label, "Apple");
+        assert_eq!(apps[1].pkg, "com.zebra");
+        assert_eq!(filter_apps(&apps, "zeb").len(), 1);
+        assert_eq!(filter_apps(&apps, "COM.APPLE").len(), 1);
+        assert_eq!(filter_apps(&apps, "").len(), 2);
+        assert!(filter_apps(&apps, "nothing").is_empty());
     }
 }

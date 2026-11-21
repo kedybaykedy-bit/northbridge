@@ -27,7 +27,8 @@ use serde_json::json;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    ChannelView, DeviceView, GuiCmd, InboundPair, OpKind, SelfInfo, UiEvent, fp_short, sort_devices,
+    AppEntry, ChannelView, DeviceView, GuiCmd, InboundPair, OpKind, SelfInfo, UiEvent, fp_short,
+    sort_devices,
 };
 
 const PAIR_TYPE: &str = "nb.pair";
@@ -1038,6 +1039,526 @@ fn do_push_clipboard(shared: Arc<Shared>, fp: String, text: String) {
     });
 }
 
+fn control_request(shared: &Arc<Shared>, fp: &str) -> Result<(String, Peer), (String, String)> {
+    match lookup_peer(shared, fp) {
+        None => Err((fp_short(fp), "device vanished from the store".to_string())),
+        Some((fp, peer)) => {
+            if !peer.trusted {
+                return Err((peer.alias.clone(), "not paired yet — pair first".to_string()));
+            }
+            Ok((fp, peer))
+        }
+    }
+}
+
+fn do_control_wake(shared: Arc<Shared>, fp: String) {
+    tokio::spawn(async move {
+        let (fp, peer) = match control_request(&shared, &fp) {
+            Ok(v) => v,
+            Err((target, detail)) => {
+                emit(
+                    &shared,
+                    UiEvent::OpResult {
+                        op: OpKind::Wake,
+                        target,
+                        ok: false,
+                        detail,
+                    },
+                );
+                return;
+            }
+        };
+        let req = NetworkPacket::new("nb.control", json!({"t": "wake"}));
+        let mut last_err: Option<String> = None;
+        for (channel, addr) in peer.dial_order() {
+            let host = addr.host.clone();
+            let packet_port = addr.http_port + 1;
+            match tokio::time::timeout(
+                DIAL_TIMEOUT,
+                send_packet(&shared.identity, &host, packet_port, &fp, &req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if resp.kind == "nb.control" => {
+                    {
+                        let mut p = shared.peers.lock().unwrap();
+                        p.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                        let _ = p.save();
+                    }
+                    push_snapshot(&shared);
+                    match crate::model::control_ok_body(&resp.body) {
+                        Ok(body) => {
+                            let detail = crate::model::wake_detail(body);
+                            emit_log(&shared, format!("[wake] {} — {detail}", peer.alias));
+                            if let Some(note) = crate::model::secure_note(body) {
+                                emit_log(&shared, format!("[wake] secure lock — {note}"));
+                            }
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Wake,
+                                    target: peer.alias.clone(),
+                                    ok: true,
+                                    detail,
+                                },
+                            );
+                        }
+                        Err(detail) => {
+                            emit_log(&shared, format!("[wake] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Wake,
+                                    target: peer.alias.clone(),
+                                    ok: false,
+                                    detail,
+                                },
+                            );
+                        }
+                    }
+                    return;
+                }
+                Ok(Ok(resp)) => {
+                    last_err = Some(format!("unexpected response: {} {}", resp.kind, resp.body));
+                }
+                Ok(Err(e)) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: {e:#}"));
+                }
+                Err(_) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: timed out"));
+                }
+            }
+        }
+        emit(
+            &shared,
+            UiEvent::OpResult {
+                op: OpKind::Wake,
+                target: peer.alias.clone(),
+                ok: false,
+                detail: last_err.unwrap_or_else(|| "no addresses".to_string()),
+            },
+        );
+    });
+}
+
+fn do_control_open(shared: Arc<Shared>, fp: String, package: String) {
+    tokio::spawn(async move {
+        if !crate::model::valid_package(&package) {
+            let target = lookup_peer(&shared, &fp)
+                .map(|(_, p)| p.alias.clone())
+                .unwrap_or_else(|| fp_short(&fp));
+            emit(
+                &shared,
+                UiEvent::OpResult {
+                    op: OpKind::Open,
+                    target,
+                    ok: false,
+                    detail: format!("bad package name: {package}"),
+                },
+            );
+            return;
+        }
+        let (fp, peer) = match control_request(&shared, &fp) {
+            Ok(v) => v,
+            Err((target, detail)) => {
+                emit(
+                    &shared,
+                    UiEvent::OpResult {
+                        op: OpKind::Open,
+                        target,
+                        ok: false,
+                        detail,
+                    },
+                );
+                return;
+            }
+        };
+        let req = NetworkPacket::new("nb.control", json!({"t": "open", "pkg": package}));
+        let mut last_err: Option<String> = None;
+        for (channel, addr) in peer.dial_order() {
+            let host = addr.host.clone();
+            let packet_port = addr.http_port + 1;
+            match tokio::time::timeout(
+                DIAL_TIMEOUT,
+                send_packet(&shared.identity, &host, packet_port, &fp, &req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if resp.kind == "nb.control" => {
+                    {
+                        let mut p = shared.peers.lock().unwrap();
+                        p.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                        let _ = p.save();
+                    }
+                    push_snapshot(&shared);
+                    match crate::model::control_ok_body(&resp.body) {
+                        Ok(body) => {
+                            let detail = crate::model::open_detail(body, &package);
+                            emit_log(&shared, format!("[open] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Open,
+                                    target: peer.alias.clone(),
+                                    ok: true,
+                                    detail,
+                                },
+                            );
+                        }
+                        Err(detail) => {
+                            emit_log(&shared, format!("[open] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Open,
+                                    target: peer.alias.clone(),
+                                    ok: false,
+                                    detail,
+                                },
+                            );
+                        }
+                    }
+                    return;
+                }
+                Ok(Ok(resp)) => {
+                    last_err = Some(format!("unexpected response: {} {}", resp.kind, resp.body));
+                }
+                Ok(Err(e)) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: {e:#}"));
+                }
+                Err(_) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: timed out"));
+                }
+            }
+        }
+        emit(
+            &shared,
+            UiEvent::OpResult {
+                op: OpKind::Open,
+                target: peer.alias.clone(),
+                ok: false,
+                detail: last_err.unwrap_or_else(|| "no addresses".to_string()),
+            },
+        );
+    });
+}
+
+fn do_fetch_apps(shared: Arc<Shared>, fp: String) {
+    tokio::spawn(async move {
+        let (fp, peer) = match control_request(&shared, &fp) {
+            Ok(v) => v,
+            Err((target, detail)) => {
+                emit(
+                    &shared,
+                    UiEvent::OpResult {
+                        op: OpKind::Apps,
+                        target: target.clone(),
+                        ok: false,
+                        detail: detail.clone(),
+                    },
+                );
+                emit(
+                    &shared,
+                    UiEvent::AppsList {
+                        target,
+                        ok: false,
+                        detail,
+                        apps: Vec::new(),
+                        total: 0,
+                        truncated: false,
+                    },
+                );
+                return;
+            }
+        };
+        let req = NetworkPacket::new("nb.control", json!({"t": "apps"}));
+        let mut last_err: Option<String> = None;
+        for (channel, addr) in peer.dial_order() {
+            let host = addr.host.clone();
+            let packet_port = addr.http_port + 1;
+            match tokio::time::timeout(
+                DIAL_TIMEOUT,
+                send_packet(&shared.identity, &host, packet_port, &fp, &req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if resp.kind == "nb.control" => {
+                    {
+                        let mut p = shared.peers.lock().unwrap();
+                        p.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                        let _ = p.save();
+                    }
+                    push_snapshot(&shared);
+                    match crate::model::control_ok_body(&resp.body) {
+                        Ok(body) => {
+                            let (apps, total, truncated) = crate::model::parse_apps(body);
+                            let summary = crate::model::apps_summary(total, truncated);
+                            let detail =
+                                format!("{summary} — showing {}", apps.len());
+                            emit_log(&shared, format!("[apps] {} — {detail}", peer.alias));
+                            let entries: Vec<AppEntry> = apps
+                                .iter()
+                                .map(|e| AppEntry {
+                                    pkg: e.pkg.clone(),
+                                    label: e.label.clone(),
+                                })
+                                .collect();
+                            emit(
+                                &shared,
+                                UiEvent::AppsList {
+                                    target: peer.alias.clone(),
+                                    ok: true,
+                                    detail: detail.clone(),
+                                    apps: entries,
+                                    total,
+                                    truncated,
+                                },
+                            );
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Apps,
+                                    target: peer.alias.clone(),
+                                    ok: true,
+                                    detail,
+                                },
+                            );
+                        }
+                        Err(detail) => {
+                            emit_log(&shared, format!("[apps] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::AppsList {
+                                    target: peer.alias.clone(),
+                                    ok: false,
+                                    detail: detail.clone(),
+                                    apps: Vec::new(),
+                                    total: 0,
+                                    truncated: false,
+                                },
+                            );
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Apps,
+                                    target: peer.alias.clone(),
+                                    ok: false,
+                                    detail,
+                                },
+                            );
+                        }
+                    }
+                    return;
+                }
+                Ok(Ok(resp)) => {
+                    last_err = Some(format!("unexpected response: {} {}", resp.kind, resp.body));
+                }
+                Ok(Err(e)) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: {e:#}"));
+                }
+                Err(_) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: timed out"));
+                }
+            }
+        }
+        let detail = last_err.unwrap_or_else(|| "no addresses".to_string());
+        emit(
+            &shared,
+            UiEvent::AppsList {
+                target: peer.alias.clone(),
+                ok: false,
+                detail: detail.clone(),
+                apps: Vec::new(),
+                total: 0,
+                truncated: false,
+            },
+        );
+        emit(
+            &shared,
+            UiEvent::OpResult {
+                op: OpKind::Apps,
+                target: peer.alias.clone(),
+                ok: false,
+                detail,
+            },
+        );
+    });
+}
+
+fn do_control_sleep(shared: Arc<Shared>, fp: String) {
+    tokio::spawn(async move {
+        let (fp, peer) = match control_request(&shared, &fp) {
+            Ok(v) => v,
+            Err((target, detail)) => {
+                emit(
+                    &shared,
+                    UiEvent::OpResult {
+                        op: OpKind::Sleep,
+                        target,
+                        ok: false,
+                        detail,
+                    },
+                );
+                return;
+            }
+        };
+        let req = NetworkPacket::new("nb.control", json!({"t": "sleep"}));
+        let mut last_err: Option<String> = None;
+        for (channel, addr) in peer.dial_order() {
+            let host = addr.host.clone();
+            let packet_port = addr.http_port + 1;
+            match tokio::time::timeout(
+                DIAL_TIMEOUT,
+                send_packet(&shared.identity, &host, packet_port, &fp, &req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if resp.kind == "nb.control" => {
+                    {
+                        let mut p = shared.peers.lock().unwrap();
+                        p.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                        let _ = p.save();
+                    }
+                    push_snapshot(&shared);
+                    match crate::model::control_ok_body(&resp.body) {
+                        Ok(body) => {
+                            let detail = crate::model::sleep_detail(body);
+                            emit_log(&shared, format!("[sleep] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Sleep,
+                                    target: peer.alias.clone(),
+                                    ok: true,
+                                    detail,
+                                },
+                            );
+                        }
+                        Err(detail) => {
+                            emit_log(&shared, format!("[sleep] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::Sleep,
+                                    target: peer.alias.clone(),
+                                    ok: false,
+                                    detail,
+                                },
+                            );
+                        }
+                    }
+                    return;
+                }
+                Ok(Ok(resp)) => {
+                    last_err = Some(format!("unexpected response: {} {}", resp.kind, resp.body));
+                }
+                Ok(Err(e)) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: {e:#}"));
+                }
+                Err(_) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: timed out"));
+                }
+            }
+        }
+        emit(
+            &shared,
+            UiEvent::OpResult {
+                op: OpKind::Sleep,
+                target: peer.alias.clone(),
+                ok: false,
+                detail: last_err.unwrap_or_else(|| "no addresses".to_string()),
+            },
+        );
+    });
+}
+
+fn do_control_keepawake(shared: Arc<Shared>, fp: String, on: bool) {
+    tokio::spawn(async move {
+        let (fp, peer) = match control_request(&shared, &fp) {
+            Ok(v) => v,
+            Err((target, detail)) => {
+                emit(
+                    &shared,
+                    UiEvent::OpResult {
+                        op: OpKind::KeepAwake,
+                        target,
+                        ok: false,
+                        detail,
+                    },
+                );
+                return;
+            }
+        };
+        let req = NetworkPacket::new("nb.control", json!({"t": "keepawake", "on": on}));
+        let mut last_err: Option<String> = None;
+        for (channel, addr) in peer.dial_order() {
+            let host = addr.host.clone();
+            let packet_port = addr.http_port + 1;
+            match tokio::time::timeout(
+                DIAL_TIMEOUT,
+                send_packet(&shared.identity, &host, packet_port, &fp, &req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if resp.kind == "nb.control" => {
+                    {
+                        let mut p = shared.peers.lock().unwrap();
+                        p.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                        let _ = p.save();
+                    }
+                    push_snapshot(&shared);
+                    match crate::model::control_ok_body(&resp.body) {
+                        Ok(_) => {
+                            let detail = crate::model::keepawake_detail(on);
+                            emit_log(&shared, format!("[keepawake] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::KeepAwake,
+                                    target: peer.alias.clone(),
+                                    ok: true,
+                                    detail,
+                                },
+                            );
+                        }
+                        Err(detail) => {
+                            emit_log(&shared, format!("[keepawake] {} — {detail}", peer.alias));
+                            emit(
+                                &shared,
+                                UiEvent::OpResult {
+                                    op: OpKind::KeepAwake,
+                                    target: peer.alias.clone(),
+                                    ok: false,
+                                    detail,
+                                },
+                            );
+                        }
+                    }
+                    return;
+                }
+                Ok(Ok(resp)) => {
+                    last_err = Some(format!("unexpected response: {} {}", resp.kind, resp.body));
+                }
+                Ok(Err(e)) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: {e:#}"));
+                }
+                Err(_) => {
+                    last_err = Some(format!("{channel} {host}:{packet_port}: timed out"));
+                }
+            }
+        }
+        emit(
+            &shared,
+            UiEvent::OpResult {
+                op: OpKind::KeepAwake,
+                target: peer.alias.clone(),
+                ok: false,
+                detail: last_err.unwrap_or_else(|| "no addresses".to_string()),
+            },
+        );
+    });
+}
+
 async fn run(mut cmd_rx: mpsc::UnboundedReceiver<GuiCmd>, event_tx: std::sync::mpsc::Sender<UiEvent>) {
     let identity = match Identity::load_or_generate(&config_dir(), None, None) {
         Ok(id) => id,
@@ -1137,6 +1658,16 @@ async fn run(mut cmd_rx: mpsc::UnboundedReceiver<GuiCmd>, event_tx: std::sync::m
             }
             GuiCmd::PushClipboard { fingerprint, text } => {
                 do_push_clipboard(Arc::clone(&shared), fingerprint, text)
+            }
+            GuiCmd::Wake { fingerprint } => do_control_wake(Arc::clone(&shared), fingerprint),
+            GuiCmd::Open {
+                fingerprint,
+                package,
+            } => do_control_open(Arc::clone(&shared), fingerprint, package),
+            GuiCmd::FetchApps { fingerprint } => do_fetch_apps(Arc::clone(&shared), fingerprint),
+            GuiCmd::Sleep { fingerprint } => do_control_sleep(Arc::clone(&shared), fingerprint),
+            GuiCmd::KeepAwake { fingerprint, on } => {
+                do_control_keepawake(Arc::clone(&shared), fingerprint, on)
             }
             GuiCmd::SetAutoPair(v) => {
                 shared.auto_pair.store(v, Ordering::SeqCst);
