@@ -40,7 +40,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -51,7 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import bit.kedybaykedy.northbridge.AppGraph
-import bit.kedybaykedy.northbridge.kvm.drawDesktopCursor
+import bit.kedybaykedy.northbridge.input.NativePointer
 import bit.kedybaykedy.northbridge.transport.ConnectionState
 import kotlin.math.PI
 import kotlin.math.tan
@@ -69,9 +68,9 @@ private val Ink = Color(0xFFF2F2F2)
 
 @Composable
 fun KvmScreen(viewModel: KvmViewModel = viewModel()) {
-    val cursor by viewModel.cursor.collectAsState()
     val phase by viewModel.phase.collectAsState()
     val connection by AppGraph.inputChannel.state.collectAsState()
+    val pointerStatus by NativePointer.status.collectAsState()
     val devices by AppGraph.deviceStore.devices.collectAsState()
     val activeFingerprint by AppGraph.deviceStore.activeFingerprint.collectAsState()
     val alias = devices.find { it.fingerprint == activeFingerprint }?.alias
@@ -129,15 +128,9 @@ fun KvmScreen(viewModel: KvmViewModel = viewModel()) {
                             }
                         },
                 ) {
-                    Canvas(Modifier.fillMaxSize()) {
-                        val position = cursor
-                        if (phase == KvmPhase.ACTIVE && position != null) {
-                            drawDesktopCursor(
-                                Offset(position.x * size.width, position.y * size.height),
-                            )
-                        }
-                    }
-                    if (phase != KvmPhase.ACTIVE || cursor == null) {
+                    if (phase == KvmPhase.ACTIVE) {
+                        ActiveOverlay(pointerStatus = pointerStatus)
+                    } else {
                         EmptyOverlay(phase = phase, connection = connection)
                     }
                 }
@@ -145,13 +138,12 @@ fun KvmScreen(viewModel: KvmViewModel = viewModel()) {
         }
         BottomBar(
             phase = phase,
-            cursorX = cursor?.x,
-            cursorY = cursor?.y,
+            pointerStatus = pointerStatus,
             onToggle = {
-                if (phase == KvmPhase.RELEASED) {
-                    viewModel.requestCapture()
-                } else {
+                if (phase == KvmPhase.ACTIVE) {
                     viewModel.releaseCapture()
+                } else {
+                    viewModel.requestCapture()
                 }
             },
         )
@@ -162,8 +154,8 @@ fun KvmScreen(viewModel: KvmViewModel = viewModel()) {
 private fun Masthead(alias: String?, phase: KvmPhase, connection: ConnectionState) {
     val phaseLabel = when (phase) {
         KvmPhase.WAITING -> "BEKLENIYOR"
-        KvmPhase.ACTIVE -> "AKTIF"
-        KvmPhase.RELEASED -> "BIRAKILDI"
+        KvmPhase.ACTIVE -> "BAGLI"
+        KvmPhase.RELEASED -> "KOPARILDI"
     }
     val connectionLabel = when (connection) {
         ConnectionState.CONNECTED -> "BAGLI"
@@ -258,14 +250,59 @@ private fun HalftoneBand(modifier: Modifier = Modifier) {
 }
 
 @Composable
+private fun ActiveOverlay(pointerStatus: String) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(K1)
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = "SISTEM IMLECI AKTIF",
+            style = TextStyle(
+                fontFamily = ArchivoBlackFamily,
+                fontWeight = FontWeight.Black,
+                fontSize = 11.sp,
+                letterSpacing = 3.sp,
+                color = G7,
+            ),
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = "PC faresini oynat: imlec telefonun ekraninda gezer. Tiklamak icin telefona dokun.",
+            textAlign = TextAlign.Center,
+            style = TextStyle(
+                fontFamily = CourierPrimeFamily,
+                fontSize = 12.sp,
+                lineHeight = 20.sp,
+                color = G8,
+            ),
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = pointerStatus,
+            textAlign = TextAlign.Center,
+            style = TextStyle(
+                fontFamily = CourierPrimeFamily,
+                fontSize = 11.sp,
+                letterSpacing = 0.5.sp,
+                color = G6,
+            ),
+        )
+    }
+}
+
+@Composable
 private fun EmptyOverlay(phase: KvmPhase, connection: ConnectionState) {
     val kicker = when (phase) {
-        KvmPhase.RELEASED -> "BIRAKILDI"
+        KvmPhase.RELEASED -> "KOPARILDI"
         else -> "BEKLENIYOR"
     }
     val hint = when {
         connection != ConnectionState.CONNECTED -> "Once Devices sekmesinde eslestirin ve baglanin."
-        phase == KvmPhase.RELEASED -> "Yeniden yakalamak icin YAKALA dugmesine dokunun."
+        phase == KvmPhase.RELEASED -> "Yeniden yakalamak icin BAGLA dugmesine dokunun."
         else -> "Yakalama istendi. Fiziksel fareyi oynatin."
     }
     Column(
@@ -303,15 +340,9 @@ private fun EmptyOverlay(phase: KvmPhase, connection: ConnectionState) {
 @Composable
 private fun BottomBar(
     phase: KvmPhase,
-    cursorX: Float?,
-    cursorY: Float?,
+    pointerStatus: String,
     onToggle: () -> Unit,
 ) {
-    val coords = if (cursorX != null && cursorY != null) {
-        "X %.4f Y %.4f".format(cursorX, cursorY)
-    } else {
-        "X ---- Y ----"
-    }
     Column(
         Modifier
             .fillMaxWidth()
@@ -319,7 +350,7 @@ private fun BottomBar(
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Text(
-            text = coords,
+            text = pointerStatus,
             style = TextStyle(
                 fontFamily = CourierPrimeFamily,
                 fontSize = 11.sp,
@@ -345,15 +376,15 @@ private fun BottomBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             MmButton(
-                label = if (phase == KvmPhase.RELEASED) "YAKALA" else "BIRAK",
+                label = if (phase == KvmPhase.ACTIVE) "KOPAR" else "BAGLA",
                 primary = true,
                 onClick = onToggle,
             )
-            MmTag(label = if (phase == KvmPhase.ACTIVE) "AKTIF" else "PASIF")
+            MmTag(label = if (phase == KvmPhase.ACTIVE) "BAGLI" else "KOPUK")
         }
         Spacer(Modifier.height(4.dp))
         Text(
-            text = "Dokunus: tik gonderir. Yakalamadayken masaustu fareyi surer.",
+            text = "BAGLA: PC girisi telefona gecer. KOPAR: giris PCye doner. Goruntu yok, yalniz giris.",
             style = TextStyle(
                 fontFamily = CourierPrimeFamily,
                 fontSize = 11.sp,

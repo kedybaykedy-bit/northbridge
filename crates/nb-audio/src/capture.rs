@@ -35,6 +35,27 @@ pub fn unavailable_hint() -> &'static str {
 }
 
 #[cfg(feature = "pipewire-cap")]
+pub fn parse_default_sink(output: &str) -> Option<String> {
+    let name = output.trim();
+    if name.is_empty() || name.contains(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+#[cfg(feature = "pipewire-cap")]
+pub fn default_sink_name() -> Option<String> {
+    let out = std::process::Command::new("pactl")
+        .arg("get-default-sink")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_default_sink(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(feature = "pipewire-cap")]
 struct CaptureState {
     tx: std::sync::mpsc::SyncSender<Vec<i16>>,
     format: Arc<std::sync::Mutex<(u32, u32)>>,
@@ -120,12 +141,20 @@ fn build_pipeline(
         tx: samples_tx,
         format,
     };
-        let props = properties! {
+        let target = default_sink_name();
+        let mut props = properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Music",
             *pw::keys::STREAM_CAPTURE_SINK => "true",
         };
+        match target {
+            Some(name) => {
+                eprintln!("[audio] capture target: {name} monitor");
+                props.insert("target.object", name);
+            }
+            None => eprintln!("[audio] capture target: session default"),
+        }
         let stream = pw::stream::Stream::new(&core, "northbridge-capture", props)?;
         let listener = stream
             .add_local_listener_with_user_data(state)
@@ -283,6 +312,26 @@ impl AudioSource for PipewireSource {
 #[cfg(all(test, feature = "pipewire-cap"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_default_sink_accepts_single_token() {
+        assert_eq!(
+            parse_default_sink("bluez_output.E8_26_CF_27_2C_06.1\n"),
+            Some("bluez_output.E8_26_CF_27_2C_06.1".to_string())
+        );
+        assert_eq!(
+            parse_default_sink("alsa_output.pci-0000_00_1b.0.analog-stereo"),
+            Some("alsa_output.pci-0000_00_1b.0.analog-stereo".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_default_sink_rejects_empty_and_multiline() {
+        assert_eq!(parse_default_sink(""), None);
+        assert_eq!(parse_default_sink("\n"), None);
+        assert_eq!(parse_default_sink("sink-a\nsink-b\n"), None);
+        assert_eq!(parse_default_sink("no default sink"), None);
+    }
 
     #[test]
     fn fold_mono_duplicates_to_stereo() {

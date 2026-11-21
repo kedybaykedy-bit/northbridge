@@ -15,10 +15,11 @@ use x11rb::protocol::xproto::KeyButMask;
 
 use crate::control::{CAP, DEFAULT_FPS, DEFAULT_MAX_W, FRAME_OPEN_KIND};
 use crate::decode::H264Decoder;
-use crate::display::{MirrorWindow, is_connection_dead};
+use crate::display::{KvmGrab, MirrorWindow, is_connection_dead};
 use crate::events::{
-    DragTracker, KeyAction, button_cancel_packet, button_down_packet, button_name,
-    button_up_packet, hover_packet, key_action, move_packet, normalize_coord, scroll_delta,
+    DragTracker, KeyAction, KvmHeld, button_cancel_packet, button_down_packet, button_name,
+    button_up_packet, enter_packet, hover_packet, key_action, key_down_packet, key_up_packet,
+    leave_packet, move_packet, normalize_coord, scroll_delta, scroll_packet, type_packet,
     xkey_to_evdev,
 };
 use crate::frame::{self, FrameMeta};
@@ -26,6 +27,7 @@ use crate::frame::{self, FrameMeta};
 pub const MAX_LINE: usize = 65536;
 pub const FRAME_QUEUE_CAP: usize = 512;
 pub const MOTION_THROTTLE: Duration = Duration::from_millis(16);
+pub const KVM_KIND: &str = "nb.kvm";
 const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const STALL_RESET: Duration = Duration::from_secs(10);
 
@@ -34,6 +36,59 @@ struct SessionState {
     max_w: u16,
     fps: u8,
     generation: u64,
+}
+
+struct KvmSlot {
+    peer: Option<String>,
+    generation: u64,
+}
+
+impl KvmSlot {
+    fn new() -> Self {
+        Self {
+            peer: None,
+            generation: 0,
+        }
+    }
+
+    fn claim(&mut self, peer_fp: &str) -> u64 {
+        self.peer = Some(peer_fp.to_string());
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn matches(&self, generation: u64, peer_fp: &str) -> bool {
+        self.generation == generation && self.peer.as_deref() == Some(peer_fp)
+    }
+
+    fn release_if(&mut self, generation: u64, peer_fp: &str) {
+        if self.matches(generation, peer_fp) {
+            self.peer = None;
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+
+    fn release_for(&mut self, peer_fp: &str) -> bool {
+        if self.peer.as_deref() == Some(peer_fp) {
+            self.peer = None;
+            self.generation = self.generation.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn release_all(&mut self) -> Option<String> {
+        let peer = self.peer.take();
+        if peer.is_some() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        peer
+    }
+}
+
+fn short_fp(fp: &str) -> &str {
+    &fp[..12.min(fp.len())]
 }
 
 #[derive(Default)]
@@ -76,6 +131,7 @@ struct ServerInner {
     tls: Option<Arc<rustls::ServerConfig>>,
     registry: InputRegistry,
     session: Mutex<SessionState>,
+    kvm: Mutex<KvmSlot>,
     stats: Mutex<Stats>,
 }
 
@@ -104,6 +160,7 @@ impl MirrorServer {
                 fps: DEFAULT_FPS,
                 generation: 0,
             }),
+            kvm: Mutex::new(KvmSlot::new()),
             stats: Mutex::new(Stats::default()),
         });
         let worker = inner.clone();
@@ -193,12 +250,99 @@ impl MirrorServer {
     }
 
     pub fn handle_control_from(&self, peer_fp: &str, body: &Value) -> Option<Value> {
-        crate::control::handle_control_from(self, peer_fp, body)
+        match body.get("t").and_then(Value::as_str) {
+            Some("kvm_grab") => {
+                let ok = self.kvm_grab(peer_fp);
+                Some(json!({"t": "kvm_grabbed", "ok": ok}))
+            }
+            Some("kvm_release") => {
+                self.kvm_release(peer_fp);
+                Some(json!({"t": "kvm_released"}))
+            }
+            _ => crate::control::handle_control_from(self, peer_fp, body),
+        }
     }
 
     fn matches(&self, generation: u64, peer_fp: &str) -> bool {
         let session = self.inner.session.lock().unwrap();
         session.generation == generation && session.peer_fp.as_deref() == Some(peer_fp)
+    }
+
+    pub fn kvm_grab(&self, peer_fp: &str) -> bool {
+        let generation = self.inner.kvm.lock().unwrap().claim(peer_fp);
+        let grab = match KvmGrab::acquire() {
+            Ok(grab) => grab,
+            Err(e) => {
+                eprintln!("[kvm] grab failed for {}: {e:#}", short_fp(peer_fp));
+                self.inner.kvm.lock().unwrap().release_if(generation, peer_fp);
+                return false;
+            }
+        };
+        let (w, h) = grab.screen_size();
+        let (nx, ny) = match grab.pointer() {
+            Ok((px, py)) => (
+                normalize_coord(px as f64, w as f64),
+                normalize_coord(py as f64, h as f64),
+            ),
+            Err(_) => (0.5, 0.5),
+        };
+        if !self.inner.registry.send(
+            peer_fp,
+            NetworkPacket::new(KVM_KIND, enter_packet(nx, ny)),
+        ) {
+            eprintln!("[kvm] peer has no input stream");
+            grab.release();
+            self.inner.kvm.lock().unwrap().release_if(generation, peer_fp);
+            return false;
+        }
+        eprintln!("[kvm] grab {} gen {generation}", short_fp(peer_fp));
+        let server = self.clone();
+        let peer = peer_fp.to_string();
+        let _ = std::thread::Builder::new()
+            .name("nb-kvm".into())
+            .spawn(move || kvm_loop(server, grab, peer, generation));
+        true
+    }
+
+    pub fn kvm_release(&self, peer_fp: &str) {
+        let had = {
+            let mut slot = self.inner.kvm.lock().unwrap();
+            slot.release_for(peer_fp)
+        };
+        if had {
+            self.inner.registry.send(
+                peer_fp,
+                NetworkPacket::new(KVM_KIND, leave_packet()),
+            );
+            eprintln!("[kvm] release {}", short_fp(peer_fp));
+        }
+    }
+
+    pub fn kvm_release_any(&self) {
+        let peer = {
+            let mut slot = self.inner.kvm.lock().unwrap();
+            slot.release_all()
+        };
+        if let Some(fp) = peer {
+            self.inner.registry.send(&fp, NetworkPacket::new(KVM_KIND, leave_packet()));
+            eprintln!("[kvm] release {}", short_fp(&fp));
+        }
+    }
+
+    pub fn kvm_is_open(&self) -> bool {
+        self.inner.kvm.lock().unwrap().peer.is_some()
+    }
+
+    pub fn kvm_peer(&self) -> Option<String> {
+        self.inner.kvm.lock().unwrap().peer.clone()
+    }
+
+    fn kvm_matches(&self, generation: u64, peer_fp: &str) -> bool {
+        self.inner.kvm.lock().unwrap().matches(generation, peer_fp)
+    }
+
+    fn kvm_released(&self, generation: u64, peer_fp: &str) {
+        self.inner.kvm.lock().unwrap().release_if(generation, peer_fp);
     }
 }
 
@@ -587,6 +731,140 @@ fn ui_loop(
     window.destroy();
 }
 
+fn kvm_send(server: &MirrorServer, peer_fp: &str, body: Value) -> bool {
+    server
+        .inner
+        .registry
+        .send(peer_fp, NetworkPacket::new(KVM_KIND, body))
+}
+
+fn kvm_loop(server: MirrorServer, mut grab: KvmGrab, peer_fp: String, generation: u64) {
+    let (w, h) = grab.screen_size();
+    let mut held = KvmHeld::new();
+    let mut last_move = Instant::now() - MOTION_THROTTLE;
+    loop {
+        if !server.kvm_matches(generation, &peer_fp) {
+            break;
+        }
+        let event = match grab.poll_event() {
+            Ok(event) => event,
+            Err(e) => {
+                if is_connection_dead(&e) {
+                    eprintln!("[kvm] X connection lost: {e:#}");
+                } else {
+                    eprintln!("[kvm] poll event: {e:#}");
+                }
+                break;
+            }
+        };
+        let Some(event) = event else {
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
+        };
+        match event {
+            Event::MotionNotify(ev) => {
+                if last_move.elapsed() < MOTION_THROTTLE {
+                    continue;
+                }
+                last_move = Instant::now();
+                let nx = normalize_coord(f64::from(ev.root_x), f64::from(w));
+                let ny = normalize_coord(f64::from(ev.root_y), f64::from(h));
+                if !kvm_send(&server, &peer_fp, move_packet(nx, ny)) {
+                    break;
+                }
+            }
+            Event::ButtonPress(ev) => {
+                if let Some((dx, dy)) = scroll_delta(ev.detail) {
+                    if !kvm_send(&server, &peer_fp, scroll_packet(dx, dy)) {
+                        break;
+                    }
+                } else if let Some(name) = button_name(ev.detail) {
+                    let nx = normalize_coord(f64::from(ev.root_x), f64::from(w));
+                    let ny = normalize_coord(f64::from(ev.root_y), f64::from(h));
+                    held.press_button(ev.detail);
+                    if !kvm_send(&server, &peer_fp, button_down_packet(name, nx, ny)) {
+                        break;
+                    }
+                }
+            }
+            Event::ButtonRelease(ev) => {
+                if scroll_delta(ev.detail).is_none() {
+                    if let Some(name) = button_name(ev.detail) {
+                        held.release_button(ev.detail);
+                        let nx = normalize_coord(f64::from(ev.root_x), f64::from(w));
+                        let ny = normalize_coord(f64::from(ev.root_y), f64::from(h));
+                        if !kvm_send(&server, &peer_fp, button_up_packet(name, Some((nx, ny)))) {
+                            break;
+                        }
+                    }
+                }
+            }
+            Event::KeyPress(ev) => {
+                let code = xkey_to_evdev(u16::from(ev.detail));
+                match kvm_keysym(&mut grab, ev.detail, ev.state).map(key_action) {
+                    Some(KeyAction::Type(ch)) => {
+                        if !kvm_send(&server, &peer_fp, type_packet(ch)) {
+                            break;
+                        }
+                    }
+                    _ => {
+                        held.press_key(code);
+                        if !kvm_send(&server, &peer_fp, key_down_packet(code)) {
+                            break;
+                        }
+                    }
+                }
+            }
+            Event::KeyRelease(ev) => {
+                let code = xkey_to_evdev(u16::from(ev.detail));
+                let is_type = matches!(
+                    kvm_keysym(&mut grab, ev.detail, ev.state).map(key_action),
+                    Some(KeyAction::Type(_))
+                );
+                if !is_type {
+                    held.release_key(code);
+                    if !kvm_send(&server, &peer_fp, key_up_packet(code)) {
+                        break;
+                    }
+                }
+            }
+            Event::FocusOut(_) => {
+                let mut ok = true;
+                for body in held.cancel_all() {
+                    if !kvm_send(&server, &peer_fp, body) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    for body in held.cancel_all() {
+        kvm_send(&server, &peer_fp, body);
+    }
+    kvm_send(&server, &peer_fp, leave_packet());
+    grab.release();
+    server.kvm_released(generation, &peer_fp);
+    eprintln!("[kvm] end {} gen {generation}", short_fp(&peer_fp));
+}
+
+fn kvm_keysym(grab: &mut KvmGrab, keycode: u8, state: KeyButMask) -> Option<u32> {
+    let keysyms = grab.keysyms(keycode);
+    if keysyms.is_empty() {
+        return None;
+    }
+    let shift = u16::from(state) & u16::from(KeyButMask::SHIFT) != 0;
+    if shift && keysyms.len() > 1 {
+        Some(keysyms[1])
+    } else {
+        Some(keysyms[0])
+    }
+}
+
 fn contains_idr(payload: &[u8]) -> bool {
     let mut i = 0;
     while i + 4 < payload.len() {
@@ -814,5 +1092,104 @@ mod tests {
         assert!(srv.is_open());
         assert_eq!(srv.session_peer().as_deref(), Some("PEER-Y"));
         assert!(srv.inner.session.lock().unwrap().generation > bumped);
+    }
+
+    #[test]
+    fn kvm_slot_claim_release() {
+        let mut slot = KvmSlot::new();
+        assert!(!slot.matches(0, "A"));
+        let gen = slot.claim("A");
+        assert!(slot.matches(gen, "A"));
+        assert!(!slot.matches(gen, "B"));
+        assert!(!slot.matches(gen.wrapping_add(1), "A"));
+        slot.release_if(gen, "B");
+        assert!(slot.matches(gen, "A"));
+        slot.release_if(gen.wrapping_add(1), "A");
+        assert!(slot.matches(gen, "A"));
+        slot.release_if(gen, "A");
+        assert!(!slot.matches(gen, "A"));
+        assert!(slot.peer.is_none());
+    }
+
+    #[test]
+    fn kvm_slot_reclaim_invalidates_old_generation() {
+        let mut slot = KvmSlot::new();
+        let first = slot.claim("A");
+        let second = slot.claim("A");
+        assert_ne!(first, second);
+        assert!(!slot.matches(first, "A"));
+        assert!(slot.matches(second, "A"));
+        let third = slot.claim("B");
+        assert!(!slot.matches(second, "A"));
+        assert!(slot.matches(third, "B"));
+    }
+
+    #[test]
+    fn kvm_slot_release_for_wrong_peer_keeps_grab() {
+        let mut slot = KvmSlot::new();
+        slot.claim("A");
+        assert!(!slot.release_for("B"));
+        assert_eq!(slot.peer.as_deref(), Some("A"));
+        assert!(slot.release_for("A"));
+        assert!(slot.peer.is_none());
+        assert!(!slot.release_for("A"));
+    }
+
+    #[test]
+    fn kvm_slot_release_all_reports_peer_once() {
+        let mut slot = KvmSlot::new();
+        assert_eq!(slot.release_all(), None);
+        slot.claim("A");
+        assert_eq!(slot.release_all().as_deref(), Some("A"));
+        assert_eq!(slot.release_all(), None);
+    }
+
+    #[test]
+    fn kvm_release_api_clears_peer() {
+        let id = Identity {
+            alias: "test".into(),
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            fingerprint: "TEST".into(),
+            port: 45900 + (std::process::id() as u16 % 100),
+        };
+        let srv = MirrorServer::start(id, InputRegistry::new());
+        assert!(!srv.kvm_is_open());
+        srv.inner.kvm.lock().unwrap().claim("PEER-K");
+        assert!(srv.kvm_is_open());
+        assert_eq!(srv.kvm_peer().as_deref(), Some("PEER-K"));
+        srv.kvm_release("OTHER");
+        assert!(srv.kvm_is_open());
+        srv.kvm_release("PEER-K");
+        assert!(!srv.kvm_is_open());
+        assert!(srv.kvm_peer().is_none());
+        srv.inner.kvm.lock().unwrap().claim("PEER-K");
+        srv.kvm_release_any();
+        assert!(!srv.kvm_is_open());
+    }
+
+    #[test]
+    fn kvm_control_release_replies_and_clears() {
+        let id = Identity {
+            alias: "test".into(),
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            fingerprint: "TEST".into(),
+            port: 45950 + (std::process::id() as u16 % 50),
+        };
+        let srv = MirrorServer::start(id, InputRegistry::new());
+        srv.inner.kvm.lock().unwrap().claim("PEER-K");
+        let out = srv
+            .handle_control_from("PEER-K", &serde_json::json!({"t": "kvm_release"}))
+            .expect("reply");
+        assert_eq!(out["t"], "kvm_released");
+        assert!(!srv.kvm_is_open());
+        let out = srv
+            .handle_control_from("PEER-K", &serde_json::json!({"t": "kvm_release"}))
+            .expect("reply");
+        assert_eq!(out["t"], "kvm_released");
+        assert!(srv
+            .handle_control_from("PEER-K", &serde_json::json!({"t": "bogus"}))
+            .is_none());
     }
 }

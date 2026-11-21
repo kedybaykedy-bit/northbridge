@@ -486,7 +486,7 @@ class AudioClient(
         val audioSource = if (captureSource == AudioCaptureSource.SYSTEM) {
             MediaRecorder.AudioSource.REMOTE_SUBMIX
         } else {
-            MediaRecorder.AudioSource.MIC
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
         }
         val minStereo = try {
             AudioRecord.getMinBufferSize(

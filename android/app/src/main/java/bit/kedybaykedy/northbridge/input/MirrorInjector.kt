@@ -42,6 +42,12 @@ class MirrorInjector {
     private var dragLastY = 0
     private var dragDownAt = 0L
 
+    private var typePending = StringBuilder()
+    private var typeFuture: java.util.concurrent.ScheduledFuture<*>? = null
+    private val typeExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { task ->
+        Thread(task).apply { isDaemon = true }
+    }
+
     fun setScreenSize(width: Int, height: Int) {
         if (width > 0 && height > 0) {
             screenW = width
@@ -50,9 +56,15 @@ class MirrorInjector {
     }
 
     fun handlePacket(body: JsonObject) {
-        when ((body["t"] as? JsonPrimitive)?.content) {
+        val t = (body["t"] as? JsonPrimitive)?.content
+        if (t != "type") {
+            flushType()
+        }
+        when (t) {
             "tap" -> handleTap(body)
             "click_abs" -> handleTap(body)
+            "enter" -> handleEnter(body)
+            "leave" -> handleLeave()
             "button" -> handleButton(body)
             "move" -> handleMove(body)
             "hover" -> handleHover(body)
@@ -61,6 +73,40 @@ class MirrorInjector {
             "scroll" -> handleScroll(body)
             else -> Unit
         }
+    }
+
+    fun tap(nx: Double, ny: Double) {
+        flushType()
+        if (pointerUp()) {
+            pointerMoveTo(nx, ny)
+            NativePointer.button(NativePointer.BTN_LEFT, true)
+            NativePointer.button(NativePointer.BTN_LEFT, false)
+            return
+        }
+        tapAt(nx, ny)
+    }
+
+    fun reset() {
+        flushType()
+        disarmDrag()
+        NativePointer.releaseAll()
+    }
+
+    private fun handleEnter(body: JsonObject) {
+        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull ?: return
+        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull ?: return
+        if (!pointerUp()) {
+            lastX = x.coerceIn(0.0, 1.0)
+            lastY = y.coerceIn(0.0, 1.0)
+            return
+        }
+        pointerMoveTo(x, y)
+    }
+
+    private fun handleLeave() {
+        flushType()
+        disarmDrag()
+        NativePointer.releaseAll()
     }
 
     private fun pointerUp(): Boolean {
@@ -237,7 +283,29 @@ class MirrorInjector {
         if (text.isEmpty()) return
         val clean = text.filter { it in TYPE_ALLOWED }
         if (clean.isEmpty()) return
-        runCommand("input text " + clean.replace(" ", "%s"))
+        synchronized(lock) {
+            typePending.append(clean)
+            typeFuture?.cancel(false)
+            typeFuture = typeExecutor.schedule(
+                { flushType() },
+                TYPE_FLUSH_MS,
+                java.util.concurrent.TimeUnit.MILLISECONDS,
+            )
+        }
+    }
+
+    private fun flushType() {
+        val text = synchronized(lock) {
+            typeFuture?.cancel(false)
+            typeFuture = null
+            if (typePending.isEmpty()) {
+                return
+            }
+            val out = typePending.toString()
+            typePending = StringBuilder()
+            out
+        }
+        runCommand("input text " + text.replace(" ", "%s"))
     }
 
     private fun handleScroll(body: JsonObject) {
@@ -362,6 +430,7 @@ class MirrorInjector {
 
     private companion object {
         const val SCROLL_THROTTLE_MS = 120L
+        const val TYPE_FLUSH_MS = 60L
         const val DRAG_THRESHOLD_PX = 16
         const val TYPE_ALLOWED = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,?!_-'\""
 

@@ -1,6 +1,7 @@
 mod capture;
 mod codec;
 mod control;
+mod echo;
 mod frame;
 mod playback;
 mod queue;
@@ -13,6 +14,7 @@ pub use codec::{
     silence_pcm,
 };
 pub use control::{AUDIO_OPEN_KIND, CAP, handle_control, handle_control_from};
+pub use echo::{ECHO_CORR_THRESHOLD, ECHO_HISTORY_MS, EchoGuard};
 pub use frame::{
     CODEC_OPUS, CODEC_PCM, FLAG_CONFIG, FLAG_DIR, FLAG_DTX, HEADER_LEN, MAGIC, MAX_PAYLOAD, VERSION,
     Direction, FrameMeta, build_header, direction_of, parse_header,

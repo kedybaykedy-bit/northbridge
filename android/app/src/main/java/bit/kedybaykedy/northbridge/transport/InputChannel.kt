@@ -67,6 +67,12 @@ class InputChannel(
     )
     val controlPackets: SharedFlow<NetworkPacket> = _controlPackets.asSharedFlow()
 
+    private val _kvmBodies = MutableSharedFlow<JsonObject>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val kvmBodies: SharedFlow<JsonObject> = _kvmBodies.asSharedFlow()
+
     private val outbox = Channel<InputMsg>(Channel.UNLIMITED)
     private val writeLock = Any()
     private var connectionJob: Job? = null
@@ -305,6 +311,11 @@ class InputChannel(
                         is InputMsg.Enter, is InputMsg.Move, InputMsg.Leave -> _messages.emit(msg)
                         else -> Unit
                     }
+                    val body = packet.body as? JsonObject ?: continue
+                    val t = (body["t"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                    if (t in KVM_BODY_TYPES) {
+                        _kvmBodies.tryEmit(body)
+                    }
                 }
                 KIND_TOUCHPAD -> {
                     if (decodeBody(packet.body) is InputMsg.Pong) {
@@ -389,6 +400,7 @@ class InputChannel(
         const val HTTP_PORT = 53317
         const val KIND_KVM = "nb.kvm"
         const val KIND_ERROR = "nb.error"
+        private val KVM_BODY_TYPES = setOf("enter", "leave", "move", "button", "scroll", "key", "type")
     }
 }
 

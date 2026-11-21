@@ -73,6 +73,87 @@ pub fn button_cancel_packet(name: &str) -> serde_json::Value {
     serde_json::json!({"t": "button", "b": name, "down": false, "cancel": true})
 }
 
+pub fn scroll_packet(dx: f64, dy: f64) -> serde_json::Value {
+    serde_json::json!({"t": "scroll", "dx": dx, "dy": dy})
+}
+
+pub fn key_down_packet(code: u16) -> serde_json::Value {
+    serde_json::json!({"t": "key", "code": code, "down": true})
+}
+
+pub fn key_up_packet(code: u16) -> serde_json::Value {
+    serde_json::json!({"t": "key", "code": code, "down": false})
+}
+
+pub fn type_packet(ch: char) -> serde_json::Value {
+    serde_json::json!({"t": "type", "s": ch.to_string()})
+}
+
+pub fn enter_packet(x: f64, y: f64) -> serde_json::Value {
+    serde_json::json!({"t": "enter", "x": x, "y": y})
+}
+
+pub fn leave_packet() -> serde_json::Value {
+    serde_json::json!({"t": "leave"})
+}
+
+pub struct KvmHeld {
+    buttons: Vec<u8>,
+    keys: Vec<u16>,
+}
+
+impl KvmHeld {
+    pub fn new() -> Self {
+        Self {
+            buttons: Vec::new(),
+            keys: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buttons.is_empty() && self.keys.is_empty()
+    }
+
+    pub fn press_button(&mut self, detail: u8) {
+        if button_name(detail).is_some() && !self.buttons.contains(&detail) {
+            self.buttons.push(detail);
+        }
+    }
+
+    pub fn release_button(&mut self, detail: u8) {
+        self.buttons.retain(|&d| d != detail);
+    }
+
+    pub fn press_key(&mut self, code: u16) {
+        if !self.keys.contains(&code) {
+            self.keys.push(code);
+        }
+    }
+
+    pub fn release_key(&mut self, code: u16) {
+        self.keys.retain(|&c| c != code);
+    }
+
+    pub fn cancel_all(&mut self) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for detail in std::mem::take(&mut self.buttons) {
+            if let Some(name) = button_name(detail) {
+                out.push(button_cancel_packet(name));
+            }
+        }
+        for code in std::mem::take(&mut self.keys) {
+            out.push(key_up_packet(code));
+        }
+        out
+    }
+}
+
+impl Default for KvmHeld {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub const DRAG_THRESHOLD_NORM: f64 = 0.012;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -280,5 +361,64 @@ mod tests {
         assert!(!drag.is_held());
         assert_eq!(drag.release(0.4, 0.4), DragRelease::Nothing);
         assert!(!drag.motion(0.5, 0.5));
+    }
+
+    #[test]
+    fn kvm_packets_carry_forward_shapes() {
+        let pkt = scroll_packet(0.0, -1.0);
+        assert_eq!(pkt["t"], "scroll");
+        assert_eq!(pkt["dx"], 0.0);
+        assert_eq!(pkt["dy"], -1.0);
+        let pkt = key_down_packet(30);
+        assert_eq!(pkt["t"], "key");
+        assert_eq!(pkt["code"], 30);
+        assert_eq!(pkt["down"], true);
+        let pkt = key_up_packet(30);
+        assert_eq!(pkt["down"], false);
+        let pkt = type_packet('a');
+        assert_eq!(pkt["t"], "type");
+        assert_eq!(pkt["s"], "a");
+        let pkt = enter_packet(0.25, 0.75);
+        assert_eq!(pkt["t"], "enter");
+        assert_eq!(pkt["x"], 0.25);
+        assert_eq!(pkt["y"], 0.75);
+        assert_eq!(leave_packet()["t"], "leave");
+    }
+
+    #[test]
+    fn kvm_held_tracks_and_cancels() {
+        let mut held = KvmHeld::new();
+        assert!(held.is_empty());
+        held.press_button(1);
+        held.press_button(1);
+        held.press_button(4);
+        held.press_key(30);
+        held.press_key(30);
+        assert!(!held.is_empty());
+        held.release_button(3);
+        held.release_key(31);
+        let pkts = held.cancel_all();
+        assert_eq!(pkts.len(), 2);
+        assert_eq!(pkts[0]["t"], "button");
+        assert_eq!(pkts[0]["b"], "left");
+        assert_eq!(pkts[0]["cancel"], true);
+        assert_eq!(pkts[1]["t"], "key");
+        assert_eq!(pkts[1]["code"], 30);
+        assert_eq!(pkts[1]["down"], false);
+        assert!(held.is_empty());
+        assert!(held.cancel_all().is_empty());
+    }
+
+    #[test]
+    fn kvm_held_release_removes() {
+        let mut held = KvmHeld::new();
+        held.press_button(1);
+        held.press_button(3);
+        held.press_key(30);
+        held.release_button(1);
+        held.release_key(30);
+        let pkts = held.cancel_all();
+        assert_eq!(pkts.len(), 1);
+        assert_eq!(pkts[0]["b"], "right");
     }
 }

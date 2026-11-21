@@ -13,6 +13,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::capture::{AudioSource, open_source, unavailable_hint};
 use crate::codec::{Codec, decode_frame, encode_frame};
 use crate::control::AUDIO_OPEN_KIND;
+use crate::echo::EchoGuard;
 use crate::frame::{self, Direction, FrameMeta, direction_of};
 use crate::playback::{AudioSink, NullSink};
 #[cfg(feature = "cpal-out")]
@@ -42,6 +43,7 @@ struct ServerInner {
     uplink: Mutex<JitterBuffer>,
     uplink_count: Mutex<u64>,
     last_uplink: Mutex<Option<Vec<i16>>>,
+    echo: Mutex<EchoGuard>,
 }
 
 #[derive(Clone)]
@@ -78,6 +80,7 @@ impl AudioServer {
             uplink: Mutex::new(JitterBuffer::new(UPLINK_CAP)),
             uplink_count: Mutex::new(0),
             last_uplink: Mutex::new(None),
+            echo: Mutex::new(EchoGuard::new()),
         });
         let worker = inner.clone();
         let _ = std::thread::Builder::new()
@@ -196,6 +199,7 @@ fn spawn_playback(inner: Arc<ServerInner>) {
             loop {
                 let pcm = inner.uplink.lock().unwrap().next();
                 sink.push(&pcm);
+                inner.echo.lock().unwrap().push_played(&pcm);
                 next += step;
                 let now = Instant::now();
                 if next > now {
@@ -320,6 +324,7 @@ async fn serve_one(
     }
     let mut ticker = tokio::time::interval(Duration::from_millis(crate::codec::FRAME_MS));
     let mut seq_out: u32 = 0;
+    let mut echo_muted = false;
     let mut header = [0u8; crate::frame::HEADER_LEN];
     loop {
         tokio::select! {
@@ -328,6 +333,19 @@ async fn serve_one(
                     break;
                 }
                 if let Some(samples) = source.next_frame() {
+                    let echo = inner.echo.lock().unwrap().is_echo(&samples);
+                    if echo != echo_muted {
+                        echo_muted = echo;
+                        if echo {
+                            eprintln!("[audio] downlink echo suppressed (own playback in monitor)");
+                        } else {
+                            eprintln!("[audio] downlink live (desktop mix)");
+                        }
+                    }
+                    if echo {
+                        while downlink.lock().unwrap().pop_oldest().is_some() {}
+                        continue;
+                    }
                     if let Ok(payload) = encode_frame(codec, &samples) {
                         downlink.lock().unwrap().push(QueuedAudio {
                             codec: codec.as_u8(),

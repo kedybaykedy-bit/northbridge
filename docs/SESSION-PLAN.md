@@ -88,3 +88,31 @@ KDE Connect baz değil; ../scrcpy salt referans (GPL-2, kod kopyası YOK). Kod y
 - PipeWire yakalama48kHz dışı cihazda frame atıyordu → resample+fold_to_stereo eklendi.
 - `PacketHandler` elinde `peer_fp` + `remote` var → adres kaydı oradan (nb.addr).
 - localsend discovery `POST /register` kullanır, `/info` çağıran kod yok (dead surface — bilgi).
+
+## 9. GÜNCEL DURUM (son güncelleme — bunu oku)
+- Commit'ler: `55cebdc` (B3/B4/B5) → `6989b64` (klavye+ses+X11) → `e9309bb` (adres kendini onarımı)
+  → `b73cf81` (batch: klavye/ses/ayna swipe/screen/GUI/PC→telefon/native imleç)
+  → `61e22f8` (wake/open/apps/sleep/keepawake) → `5796821` (GUI uzaktan kontrol).
+  Tree bu son commit'te temizdi.
+- **Kullanıcı kararları:** KVM = **sadece giriş paylaşımı** (video yok, Barrier gibi),
+  tetik/bırak **telefondaki buton**, PC imleci grab'de gizli. **Sanal ekran: tek tane** (çoklu
+  = onayla), panel **hem kapalı hem açık** senaryosu istenecek. **Shizuku YAPILMAYAK** (not).
+  Dosya paylaşımı = **basit gönder/al** (detay sonra). GUI = **hepsi** (görsel + özellik).
+  Yatayda **sekmeler yana**, dikeyde altta. Testler **en sonda**. R-E (2PC↔2telefon) sıraya alındı.
+- **İsimlendirme:** kullanıcıya R-A/R-B gibi etiket DEME — düz Türkçe isim kullan.
+- **Kilit:** telefonda **desen kilidi var** → uzaktan desen girişi isteyecek (aynada kilit
+  ekranı + MotionEvent ile yol enjeksiyonu; `input swipe` düz çizgi olduğu için yetmez →
+  root helper gerekir, sanal ekran helper'ıyla aynı).
+- **Açık şikayetler:** (1) GUI çirkinmiş (eğimli tile yok) → yenileniyor,
+  (2) **ses döngüsü**: telefon mikrofonu bir süre sonra TELEFON hoparlöründen çıkıyor →
+  muhtemel kök: PC'nin yakalama kaynağı kendi çıkışının monitor'ü (loopback) → düzeltme koşuyor,
+  (3) yatayda sekmeler yana.
+- **ÇALIŞAN5 AGENT (dosyaları ayrık):** KVM giriş paylaşımı (nb-mirror + KvmScreen +
+  PacketServer) · dosya gönder/al (nb-transport + nb-cli/main.rs + yeni ui/files — **nav
+  bağlantısını LEAD ekleyecek**) · GUI yenileme (nb-gui tek sahip) · yatay yan sekmeler
+  (NorthbridgeRoot + theme + CommonUi) · ses döngüsü (nb-audio + ui/audio).
+  **Kural: aynı dosyayı iki agent paylaşmaz; nb-mirror'a A1 bitmeden dokunma.**
+- **Sırada:** sanal ekran (faz0 keşif: `ServiceManager.getDisplayManager().createVirtualDisplay`
+  root `app_process` ile + `screenrecord --display-id` sanal ekranı yakalar mı + `input -d <id>`)
+  → kilit deseni (aynı helper) → fps (SHM) → R-E → **en sonda test turu (11 madde)**.
+- Telefon bazen sökülüyor (kullanıcı takıp söküyor) — adb b1a403c6.

@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import bit.kedybaykedy.northbridge.R
+import bit.kedybaykedy.northbridge.transport.FileServer
 import bit.kedybaykedy.northbridge.transport.PacketServer
 
 class PacketKeepAliveService : Service() {
@@ -29,6 +30,7 @@ class PacketKeepAliveService : Service() {
             .build()
         startForeground(2, notification)
         PacketServer.start()
+        FileServer.start()
         return START_STICKY
     }
 }

@@ -20,7 +20,7 @@ use nb_mirror::MirrorServer;
 use nb_transport::ls::{
     UnreachableNotices, ingest_discovery, ingest_register, start_ls,
 };
-use nb_transport::{InputRegistry, PacketHandler, send_files, send_packet, start_packet_server};
+use nb_transport::{InputRegistry, PacketHandler, file_port, send_files, send_file_via_packet, send_packet, start_packet_server};
 use localsend::http::server::common::save::FileUploadTarget;
 use localsend::http::server::v2::{PrepareUploadDecisionV2, ServerEventV2};
 use localsend::discovery::DiscoveryEvent;
@@ -1153,6 +1153,12 @@ async fn cmd_send(cfg: &Option<PathBuf>, target: &str, files: Vec<PathBuf>) -> R
         quick_discover(&identity, &mut peers).await?;
     }
     let (fp, peer) = resolve_with_wait(target, &mut peers).await?;
+    if !peer.trusted {
+        anyhow::bail!(
+            "{} is not paired yet — run `northbridge pair {target}` first",
+            peer.alias
+        );
+    }
 
     for f in &files {
         if !f.is_file() {
@@ -1172,13 +1178,37 @@ async fn cmd_send(cfg: &Option<PathBuf>, target: &str, files: Vec<PathBuf>) -> R
         match send_files(&identity, &host, addr.http_port, &fp, &files).await {
             Ok(sent) => {
                 for name in &sent {
-                    println!("  sent {name}");
+                    println!("  sent {name} (http)");
                 }
                 peers.observe(&fp, &peer.alias, channel, &host, addr.http_port);
                 save_peers(&peers)?;
                 return Ok(());
             }
-            Err(e) => last_err = Some(format!("{channel} {host}: {e:#}")),
+            Err(e) => {
+                println!("[send] http failed ({e:#}) — trying packet channel…");
+                last_err = Some(format!("http {host}: {e:#}"));
+            }
+        }
+        let fport = file_port(addr.http_port);
+        println!("sending {} file(s) to {} via {channel} ({host}:{fport}, packet)…", files.len(), peer.alias);
+        let shown = std::sync::atomic::AtomicU64::new(u64::MAX);
+        let progress = |name: &str, done: u64, total: u64| {
+            let tens = if total == 0 { 10 } else { done * 10 / total };
+            if tens != shown.swap(tens, std::sync::atomic::Ordering::Relaxed) || done == total {
+                let pct = if total == 0 { 100 } else { done * 100 / total };
+                println!("  {name}: {pct}% ({done}/{total} bytes)");
+            }
+        };
+        match send_file_via_packet(&identity, &host, fport, &fp, &files, Some(&progress)).await {
+            Ok(sent) => {
+                for name in &sent {
+                    println!("  sent {name} (packet)");
+                }
+                peers.observe(&fp, &peer.alias, channel, &host, addr.http_port);
+                save_peers(&peers)?;
+                return Ok(());
+            }
+            Err(e) => last_err = Some(format!("{}; packet {host}:{fport}: {e:#}", last_err.unwrap_or_default())),
         }
     }
     anyhow::bail!(

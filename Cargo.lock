@@ -2968,6 +2968,7 @@ name = "nb-transport"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "localsend",
  "mime_guess",
  "nb-core",
