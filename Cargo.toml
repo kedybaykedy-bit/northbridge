@@ -6,6 +6,7 @@ members = [
     "crates/nb-discovery",
     "crates/nb-cli",
     "crates/nb-input",
+    "crates/nb-screen",
     "plugins/nb-ping",
     "plugins/nb-clipboard",
 ]
@@ -18,6 +19,7 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 nb-core = { path = "crates/nb-core" }
 nb-transport = { path = "crates/nb-transport" }
+nb-screen = { path = "crates/nb-screen" }
 nb-discovery = { path = "crates/nb-discovery" }
 nb-input = { path = "crates/nb-input" }
 nb-ping = { path = "plugins/nb-ping" }
@@ -35,3 +37,4 @@ tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4"] }
 mime_guess = "2.0"
 x11rb = { version = "0.13", features = ["xtest", "xfixes"] }
+jpeg-encoder = "0.7"

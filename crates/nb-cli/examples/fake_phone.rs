@@ -4,7 +4,7 @@ use nb_core::packet::NetworkPacket;
 use nb_transport::{INPUT_OPEN_KIND, tls};
 use serde_json::json;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -106,8 +106,8 @@ async fn main() -> Result<()> {
             "protocol": nb_core::packet::PROTOCOL_VERSION,
             "alias": "fake-phone",
             "timestamp": nb_core::packet::now_ms(),
-            "incoming": ["nb.kvm"],
-            "outgoing": ["nb.touchpad"],
+            "incoming": ["nb.kvm", "nb.screen"],
+            "outgoing": ["nb.touchpad", "nb.screen"],
         }),
     )
     .await?;
@@ -168,6 +168,10 @@ async fn main() -> Result<()> {
     .await?;
 
     println!("[7] touchpad rel_move injection (not capturing)…");
+    let _ = std::process::Command::new("xdotool")
+        .args(["mousemove", "600", "400"])
+        .output();
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let before = mouse();
     send(
         &mut w,
@@ -186,6 +190,61 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("FAKE PHONE OK — full KVM handshake verified");
+    println!("[8] screen stream (nb.screen open → NBS1 frames)…");
+    send(
+        &mut w,
+        "nb.screen",
+        json!({"t": "open", "max_w": 1280, "fps": 12}),
+    )
+    .await?;
+    let opened = recv_until(&mut r, Duration::from_secs(5), "screen opened", |p| {
+        p.kind == "nb.screen" && p.body.get("t").and_then(|v| v.as_str()) == Some("opened")
+    })
+    .await?;
+    let frame_port = opened.body.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    println!("  frame port {frame_port}");
+
+    let (mut fr, mut fw) = connect(&id, host, frame_port).await?;
+    send(&mut fw, "nb.screen.frame.open", json!({})).await?;
+    recv_until(&mut fr, Duration::from_secs(10), "frame ack", |p| {
+        p.kind == "nb.screen.frame.open"
+            && p.body.get("ok").and_then(|v| v.as_bool()) == Some(true)
+    })
+    .await?;
+
+    for _ in 0..2u32 {
+        let mut hdr = [0u8; 28];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            AsyncReadExt::read_exact(&mut fr, &mut hdr),
+        )
+        .await
+        .context("frame header timeout")??;
+        assert_eq!(&hdr[0..4], &b"NBS1"[..], "frame magic");
+        let seq = u32::from_be_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
+        let wpx = u16::from_be_bytes([hdr[20], hdr[21]]);
+        let hpx = u16::from_be_bytes([hdr[22], hdr[23]]);
+        let len = u32::from_be_bytes([hdr[24], hdr[25], hdr[26], hdr[27]]) as usize;
+        assert!(len > 0 && len <= 8 * 1024 * 1024, "frame len {len}");
+        let mut payload = vec![0u8; len];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            AsyncReadExt::read_exact(&mut fr, &mut payload),
+        )
+        .await
+        .context("frame payload timeout")??;
+        assert_eq!(&payload[..2], &[0xFF, 0xD8], "jpeg SOI");
+        println!("  frame seq={seq} {wpx}x{hpx} {len}B jpeg");
+    }
+
+    send(&mut w, "nb.screen", json!({"t": "release"})).await?;
+    recv_until(&mut r, Duration::from_secs(5), "screen closed", |p| {
+        p.kind == "nb.screen" && p.body.get("t").and_then(|v| v.as_str()) == Some("closed")
+    })
+    .await?;
+    drop(fw);
+    drop(fr);
+
+    println!("FAKE PHONE OK — KVM handshake + touchpad injection + screen stream verified");
     Ok(())
 }

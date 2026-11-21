@@ -1,0 +1,16 @@
+[package]
+name = "nb-screen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nb-core = { workspace = true }
+nb-transport = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+x11rb = { workspace = true, features = ["shm"] }
+jpeg-encoder = { workspace = true }

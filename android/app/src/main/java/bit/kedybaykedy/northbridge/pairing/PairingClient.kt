@@ -27,8 +27,8 @@ data class PairOutcome(
 object PairingClient {
 
     private const val PROTOCOL_VERSION = "2.2"
-    private const val CAPABILITY_IN = "nb.kvm"
-    private const val CAPABILITY_OUT = "nb.touchpad"
+    private val CAPABILITY_IN = listOf("nb.kvm", "nb.screen")
+    private val CAPABILITY_OUT = listOf("nb.touchpad", "nb.screen")
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -89,11 +89,11 @@ object PairingClient {
             put("timestamp", now)
             put(
                 "incoming",
-                JsonArray(listOf(JsonPrimitive(CAPABILITY_IN))),
+                JsonArray(CAPABILITY_IN.map { JsonPrimitive(it) }),
             )
             put(
                 "outgoing",
-                JsonArray(listOf(JsonPrimitive(CAPABILITY_OUT))),
+                JsonArray(CAPABILITY_OUT.map { JsonPrimitive(it) }),
             )
             put("pin", pin)
         }

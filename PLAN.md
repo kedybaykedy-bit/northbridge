@@ -53,9 +53,18 @@ northbridge/
   anchor'a geri warp). E2E: `examples/fake_phone.rs` (pair → stream → ping/pong
   → capture/enter/move/leave → rel_move enjeksiyonu birebir) ✓
   Protokol: `docs/PROTOCOL.md`
-- **M3 (araştırma tamam ✓):** ekran akışı — öneri: MIT-SHM ile yakalama +
-  MJPEG 10–15 fps (M3-a), `openh264` ile H.264 + Android MediaCodec (M3-b),
-  ayrı mTLS portu; ayrıntı: `docs/M3-RESEARCH.md`
+- **M3-a (tamam ✓):** PC→telefon ekran akışı — `nb-screen` crate: X11 `get_image`
+  (SHM stratejisi hazır) → ≤1280 downscale → JPEG q70, drop-oldest kuyruk,
+  ayrı mTLS frame portu (`http+2`=53319), `NBS1` 28-byte başlık, `nb.screen`
+  kontrol mesajları (stream'de `open`/`release`). E2E: `fake_phone` gerçek
+  X11'den 1280x720 kareleri alıp ayrıştırdı ✓. Android tarafı: `ui/screen/`
+  (BAŞLAT/DURDUR, monokrom çerçeve)
+- **M3-b (planlı):** telefon→PC penceresi (iPhone-Mirroring hissi) — scrcpy
+  yaklaşımı: MediaCodec H.264 encode + Shizuku(root) shell izinleri + geri
+  dokunma; referans kaynak: `../scrcpy` (GPL-2 → kod kopyası yok, yaklaşım var)
+- **M4 (araştırma tamam ✓):** `docs/M4-RESEARCH.md` — pipewire-rs+cpal (masa),
+  rooted REMOTE_SUBMIX + Shizuku alternatifi (telefon), Opus 48kHz/20ms,
+  port 53320, `NBA1` 24-byte başlık; M4-a/M4-b kademeli
 - **M4:** ses köprüsü (cpal + Opus/UDP)
 - **M5:** Bluetooth RFCOMM transport
 

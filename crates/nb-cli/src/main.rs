@@ -14,6 +14,7 @@ use nb_core::peer::Peers;
 use nb_core::plugin::{Plugin, PluginCtx, dispatch, plugins_for_capabilities, union_incoming, union_outgoing};
 use nb_discovery::{discover_staged, probe_tailscale, tailscale_channels};
 use nb_ping::PingPlugin;
+use nb_screen::ScreenServer;
 use nb_transport::ls::{
     UnreachableNotices, ingest_discovery, ingest_register, start_ls,
 };
@@ -131,15 +132,41 @@ fn load_peers(cfg: &Option<PathBuf>) -> Result<Peers> {
     Peers::load(&peers_path(cfg))
 }
 
+struct ScreenPlugin {
+    server: Option<ScreenServer>,
+}
+
+impl Plugin for ScreenPlugin {
+    fn id(&self) -> &str {
+        nb_screen::CAP
+    }
+
+    fn incoming(&self) -> &[&str] {
+        &[nb_screen::CAP]
+    }
+
+    fn outgoing(&self) -> &[&str] {
+        &[nb_screen::CAP]
+    }
+
+    fn on_packet(&mut self, ctx: &PluginCtx, pkt: &NetworkPacket) -> Option<NetworkPacket> {
+        let server = self.server.as_ref()?;
+        let body = nb_screen::handle_control_from(server, &ctx.peer_fingerprint, &pkt.body)?;
+        Some(NetworkPacket::new(nb_screen::CAP, body))
+    }
+}
+
 fn make_plugins(
     clip: SharedState,
     input: Arc<Mutex<InputState>>,
     registry: InputRegistry,
+    screen: Option<ScreenServer>,
 ) -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(PingPlugin),
         Box::new(ClipboardPlugin::new(clip)),
         Box::new(TouchpadPlugin::new(input, registry)),
+        Box::new(ScreenPlugin { server: screen }),
     ]
 }
 
@@ -176,10 +203,13 @@ async fn cmd_listen(
     let clip = nb_clipboard::shared_state();
     let registry = InputRegistry::new();
     let input = Arc::new(Mutex::new(InputState::with_display()));
+    let screen = ScreenServer::start(identity.clone());
+    println!("[screen] frame port :{}", identity.port + 2);
     let plugins = Arc::new(Mutex::new(make_plugins(
         Arc::clone(&clip),
         Arc::clone(&input),
         registry.clone(),
+        Some(screen),
     )));
 
     println!("northbridge listen");
@@ -640,6 +670,7 @@ async fn cmd_pair(cfg: &Option<PathBuf>, target: &str) -> Result<()> {
         nb_clipboard::shared_state(),
         Arc::new(Mutex::new(InputState::new())),
         InputRegistry::new(),
+        None,
     );
     let req = NetworkPacket::new(
         PAIR_TYPE,
