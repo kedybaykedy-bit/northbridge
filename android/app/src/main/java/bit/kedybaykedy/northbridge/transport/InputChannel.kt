@@ -1,5 +1,6 @@
 package bit.kedybaykedy.northbridge.transport
 
+import android.os.Looper
 import android.util.Log
 import bit.kedybaykedy.northbridge.AppGraph
 import bit.kedybaykedy.northbridge.data.TrustedDevice
@@ -119,16 +120,27 @@ class InputChannel(
     }
 
     fun sendPacket(kind: String, body: JsonElement): Boolean {
+        val packet = NetworkPacket(
+            id = System.currentTimeMillis(),
+            kind = kind,
+            body = body,
+        )
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (attached == null) return false
+            scope.launch {
+                try {
+                    writePacket(packet)
+                } catch (e: Exception) {
+                    Log.w("northbridge", "packet send failed ($kind): $e")
+                }
+            }
+            return true
+        }
         return try {
-            writePacket(
-                NetworkPacket(
-                    id = System.currentTimeMillis(),
-                    kind = kind,
-                    body = body,
-                ),
-            )
+            writePacket(packet)
             true
-        } catch (_: IOException) {
+        } catch (e: Exception) {
+            Log.w("northbridge", "packet send failed ($kind): $e")
             false
         }
     }

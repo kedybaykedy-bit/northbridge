@@ -9,6 +9,7 @@ import bit.kedybaykedy.northbridge.input.NativePointer
 import bit.kedybaykedy.northbridge.transport.ConnectionState
 import bit.kedybaykedy.northbridge.transport.InputMsg
 import bit.kedybaykedy.northbridge.transport.KIND_MIRROR
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -77,14 +78,16 @@ class KvmViewModel : ViewModel() {
     }
 
     fun requestCapture() {
-        NativePointer.sessionStart()
         if (captureHeld) return
         captureHeld = true
         userReleased = false
         if (_phase.value != KvmPhase.ACTIVE) {
             _phase.value = KvmPhase.WAITING
         }
-        AppGraph.inputChannel.sendPacket(KIND_MIRROR, grabBody())
+        viewModelScope.launch(Dispatchers.IO) {
+            NativePointer.sessionStart()
+            AppGraph.inputChannel.sendPacket(KIND_MIRROR, grabBody())
+        }
     }
 
     fun releaseCapture() {
