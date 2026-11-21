@@ -1,13 +1,17 @@
 package bit.kedybaykedy.northbridge.transport
 
+import java.net.Socket
 import java.security.KeyStore
+import java.security.Principal
 import java.security.cert.Certificate
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
+import javax.net.ssl.KeyManager
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
+import javax.net.ssl.X509KeyManager
 import javax.net.ssl.X509TrustManager
 
 object Tls {
@@ -38,14 +42,44 @@ object Tls {
         }
     }
 
+    private fun issuerBlindKeyManager(delegate: X509KeyManager, alias: String): X509KeyManager =
+        object : X509KeyManager {
+            override fun chooseClientAlias(
+                keyType: Array<out String>?,
+                issuers: Array<out Principal>?,
+                socket: Socket?,
+            ): String = alias
+
+            override fun chooseServerAlias(
+                keyType: String?,
+                issuers: Array<out Principal>?,
+                socket: Socket?,
+            ): String? = delegate.chooseServerAlias(keyType, issuers, socket)
+
+            override fun getCertificateChain(alias: String?): Array<X509Certificate>? =
+                delegate.getCertificateChain(alias)
+
+            override fun getPrivateKey(alias: String?): java.security.PrivateKey? =
+                delegate.getPrivateKey(alias)
+
+            override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
+                delegate.getClientAliases(keyType, issuers)
+
+            override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
+                delegate.getServerAliases(keyType, issuers)
+        }
+
     fun socketFactory(identity: PhoneIdentity, trust: X509TrustManager): SSLSocketFactory {
         val keyStore = KeyStore.getInstance("PKCS12")
         keyStore.load(null, null)
         keyStore.setKeyEntry("nb", identity.privateKey, charArrayOf(), arrayOf<Certificate>(identity.cert))
         val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         keyManagerFactory.init(keyStore, charArrayOf())
+        val keyManagers = keyManagerFactory.keyManagers.map { manager ->
+            if (manager is X509KeyManager) issuerBlindKeyManager(manager, "nb") else manager
+        }
         val context = SSLContext.getInstance("TLS")
-        context.init(keyManagerFactory.keyManagers, arrayOf<TrustManager>(trust), null)
+        context.init(keyManagers.toTypedArray(), arrayOf<TrustManager>(trust), null)
         return context.socketFactory
     }
 }

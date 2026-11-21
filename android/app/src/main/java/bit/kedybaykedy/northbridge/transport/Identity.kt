@@ -20,7 +20,6 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.security.SecureRandom
-import java.security.Security
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
@@ -73,9 +72,6 @@ object IdentityStore {
     }
 
     private fun generate(alias: String): PhoneIdentity {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(BouncyCastleProvider())
-        }
         val keyPairGenerator = KeyPairGenerator.getInstance("RSA")
         keyPairGenerator.initialize(2048, SecureRandom())
         val keyPair = keyPairGenerator.generateKeyPair()
@@ -108,7 +104,7 @@ object IdentityStore {
             ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth),
         )
         val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+            .setProvider(BouncyCastleProvider())
             .build(keyPair.private)
         val certificate = JcaX509CertificateConverter().getCertificate(builder.build(signer))
         val certPem = pemEncode("CERTIFICATE", certificate.encoded)

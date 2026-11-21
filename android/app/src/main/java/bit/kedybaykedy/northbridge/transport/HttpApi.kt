@@ -1,5 +1,6 @@
 package bit.kedybaykedy.northbridge.transport
 
+import android.util.Log
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -46,6 +47,7 @@ object HttpApi {
                 .get()
                 .build()
             try {
+                Log.d("northbridge", "probe GET $host:$port")
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@withContext null
                     val body = response.body?.string() ?: return@withContext null
@@ -63,9 +65,11 @@ object HttpApi {
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (_: IOException) {
+            } catch (e: IOException) {
+                Log.e("northbridge", "probe failed", e)
                 null
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("northbridge", "probe error", e)
                 null
             }
         }

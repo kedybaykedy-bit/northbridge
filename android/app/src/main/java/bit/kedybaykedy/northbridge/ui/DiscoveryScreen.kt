@@ -1,5 +1,10 @@
 package bit.kedybaykedy.northbridge.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -39,10 +44,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import bit.kedybaykedy.northbridge.data.DiscoveredDevice
 
@@ -51,6 +58,30 @@ fun DiscoveryScreen(viewModel: DiscoveryViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var manualAddress by rememberSaveable { mutableStateOf("") }
+
+    val context = LocalContext.current
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            viewModel.startDiscovery()
+        }
+    }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                viewModel.startDiscovery()
+            } else {
+                permissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+            }
+        } else {
+            viewModel.startDiscovery()
+        }
+    }
 
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect

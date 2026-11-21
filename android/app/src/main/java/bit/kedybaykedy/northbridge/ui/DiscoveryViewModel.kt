@@ -38,7 +38,7 @@ class DiscoveryViewModel : ViewModel() {
     private val _state = MutableStateFlow(DiscoveryUiState())
     val state: StateFlow<DiscoveryUiState> = _state.asStateFlow()
 
-    init {
+    fun startDiscovery() {
         discovery.start(viewModelScope) { heard -> onHeard(heard) }
     }
 

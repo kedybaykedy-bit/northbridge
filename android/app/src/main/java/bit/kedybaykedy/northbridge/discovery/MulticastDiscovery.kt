@@ -2,6 +2,7 @@ package bit.kedybaykedy.northbridge.discovery
 
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.util.Log
 import bit.kedybaykedy.northbridge.transport.MulticastAnnouncement
 import java.net.DatagramPacket
 import java.net.InetAddress
@@ -27,7 +28,10 @@ class MulticastDiscovery(private val context: Context) {
     private var socket: MulticastSocket? = null
 
     fun start(scope: CoroutineScope, onAnnouncement: (HeardAnnouncement) -> Unit) {
+        if (socket != null) return
         scope.launch(Dispatchers.IO) {
+            if (socket != null) return@launch
+            Log.d("northbridge", "discovery start")
             val wifi = context.applicationContext
                 .getSystemService(Context.WIFI_SERVICE) as WifiManager
             val multicastLock = wifi.createMulticastLock("northbridge-discovery")
@@ -36,16 +40,16 @@ class MulticastDiscovery(private val context: Context) {
             lock = multicastLock
 
             val multicastSocket = try {
-                MulticastSocket().apply {
-                    reuseAddress = true
-                    bind(InetSocketAddress(DISCOVERY_PORT))
+                MulticastSocket(DISCOVERY_PORT).apply {
                     soTimeout = RECEIVE_TIMEOUT_MS
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("northbridge", "discovery socket failed", e)
                 multicastLock.release()
                 return@launch
             }
             socket = multicastSocket
+            Log.d("northbridge", "discovery socket ready")
 
             val group = InetAddress.getByName(GROUP_ADDRESS)
             joinInterfaces(multicastSocket, group)
@@ -69,6 +73,7 @@ class MulticastDiscovery(private val context: Context) {
                     continue
                 }
                 val host = packet.address?.hostAddress ?: continue
+                Log.d("northbridge", "discovery heard ${message.alias} from $host")
                 onAnnouncement(HeardAnnouncement(host, message))
             }
         }
@@ -110,9 +115,12 @@ class MulticastDiscovery(private val context: Context) {
         if (!joined) {
             try {
                 multicastSocket.joinGroup(group)
-            } catch (_: Exception) {
+                joined = true
+            } catch (e: Exception) {
+                Log.e("northbridge", "discovery join failed: $e")
             }
         }
+        Log.d("northbridge", "discovery joined=$joined")
     }
 
     companion object {
