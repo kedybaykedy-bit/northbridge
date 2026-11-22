@@ -19,14 +19,14 @@ use crate::display::{KvmGrab, MirrorWindow, is_connection_dead};
 use crate::events::{
     DragTracker, KeyAction, KvmHeld, button_cancel_packet, button_down_packet, button_name,
     button_up_packet, enter_packet, hover_packet, key_action, key_down_packet, key_up_packet,
-    leave_packet, move_packet, normalize_coord, scroll_delta, scroll_packet, type_packet,
+    leave_packet, move_delta_packet, move_packet, normalize_coord, scroll_delta, scroll_packet, type_packet,
     xkey_to_evdev,
 };
 use crate::frame::{self, FrameMeta};
 
 pub const MAX_LINE: usize = 65536;
 pub const FRAME_QUEUE_CAP: usize = 512;
-pub const MOTION_THROTTLE: Duration = Duration::from_millis(16);
+pub const MOTION_THROTTLE: Duration = Duration::from_millis(4);
 pub const KVM_KIND: &str = "nb.kvm";
 const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const STALL_RESET: Duration = Duration::from_secs(10);
@@ -744,6 +744,9 @@ fn kvm_loop(server: MirrorServer, mut grab: KvmGrab, peer_fp: String, generation
     let mut last_move = Instant::now() - MOTION_THROTTLE;
     let mut motion_n = 0u32;
     let mut motion_t = Instant::now();
+    let mut acc_dx = 0.0f64;
+    let mut acc_dy = 0.0f64;
+    let mut other_logged = 0u32;
     loop {
         if !server.kvm_matches(generation, &peer_fp) {
             break;
@@ -763,22 +766,57 @@ fn kvm_loop(server: MirrorServer, mut grab: KvmGrab, peer_fp: String, generation
             std::thread::sleep(Duration::from_millis(4));
             continue;
         };
+        if other_logged < 12 {
+            let name = match &event {
+                Event::XinputRawMotion(_) => "raw",
+                Event::MotionNotify(_) => "motion",
+                Event::ButtonPress(_) => "bpress",
+                Event::ButtonRelease(_) => "brel",
+                Event::KeyPress(_) => "kpress",
+                Event::KeyRelease(_) => "krel",
+                _ => "other",
+            };
+            if name != "raw" {
+                eprintln!("[kvm] ev {name}");
+                other_logged += 1;
+            }
+        }
         match event {
-            Event::MotionNotify(ev) => {
-                if last_move.elapsed() < MOTION_THROTTLE {
-                    continue;
+            Event::XinputRawMotion(ev) => {
+                let m = ev.valuator_mask.first().copied().unwrap_or(0);
+                let mut idx = 0usize;
+                let mut dx = 0.0f64;
+                let mut dy = 0.0f64;
+                for bit in 0..32u32 {
+                    if m & (1 << bit) != 0 {
+                        if let Some(raw) = ev.axisvalues_raw.get(idx) {
+                            let v = f64::from(raw.integral) + f64::from(raw.frac) / 4294967296.0;
+                            if bit == 0 {
+                                dx = v;
+                            } else if bit == 1 {
+                                dy = v;
+                            }
+                        }
+                        idx += 1;
+                    }
                 }
-                last_move = Instant::now();
-                motion_n += 1;
-                if motion_t.elapsed() >= Duration::from_secs(1) {
-                    eprintln!("[kvm] fwd {motion_n} motion/s");
-                    motion_n = 0;
-                    motion_t = Instant::now();
-                }
-                let nx = normalize_coord(f64::from(ev.root_x), f64::from(w));
-                let ny = normalize_coord(f64::from(ev.root_y), f64::from(h));
-                if !kvm_send(&server, &peer_fp, move_packet(nx, ny)) {
-                    break;
+                acc_dx += dx;
+                acc_dy += dy;
+                if last_move.elapsed() >= MOTION_THROTTLE {
+                    last_move = Instant::now();
+                    motion_n += 1;
+                    if motion_t.elapsed() >= Duration::from_secs(1) {
+                        eprintln!("[kvm] fwd {motion_n} motion/s");
+                        motion_n = 0;
+                        motion_t = Instant::now();
+                    }
+                    if acc_dx != 0.0 || acc_dy != 0.0 {
+                        if !kvm_send(&server, &peer_fp, move_delta_packet(acc_dx, acc_dy)) {
+                            break;
+                        }
+                        acc_dx = 0.0;
+                        acc_dy = 0.0;
+                    }
                 }
             }
             Event::ButtonPress(ev) => {
@@ -787,10 +825,8 @@ fn kvm_loop(server: MirrorServer, mut grab: KvmGrab, peer_fp: String, generation
                         break;
                     }
                 } else if let Some(name) = button_name(ev.detail) {
-                    let nx = normalize_coord(f64::from(ev.root_x), f64::from(w));
-                    let ny = normalize_coord(f64::from(ev.root_y), f64::from(h));
                     held.press_button(ev.detail);
-                    if !kvm_send(&server, &peer_fp, button_down_packet(name, nx, ny)) {
+                    if !kvm_send(&server, &peer_fp, button_down_packet(name)) {
                         break;
                     }
                 }
@@ -799,9 +835,7 @@ fn kvm_loop(server: MirrorServer, mut grab: KvmGrab, peer_fp: String, generation
                 if scroll_delta(ev.detail).is_none() {
                     if let Some(name) = button_name(ev.detail) {
                         held.release_button(ev.detail);
-                        let nx = normalize_coord(f64::from(ev.root_x), f64::from(w));
-                        let ny = normalize_coord(f64::from(ev.root_y), f64::from(h));
-                        if !kvm_send(&server, &peer_fp, button_up_packet(name, Some((nx, ny)))) {
+                        if !kvm_send(&server, &peer_fp, button_up_packet(name)) {
                             break;
                         }
                     }
@@ -961,7 +995,7 @@ fn drain_events(
                         fwd.drag.press(nx, ny);
                         fwd.last_move = Instant::now();
                     }
-                    fwd.push(button_down_packet(name, nx, ny));
+                    fwd.push(button_down_packet(name));
                 }
             }
             Event::ButtonRelease(ev) => {
@@ -976,9 +1010,9 @@ fn drain_events(
                             let nx = normalize_coord(ev.event_x as f64, w as f64);
                             let ny = normalize_coord(ev.event_y as f64, h as f64);
                             fwd.drag.release(nx, ny);
-                            fwd.push(button_up_packet(name, Some((nx, ny))));
+                            fwd.push(button_up_packet(name));
                         } else {
-                            fwd.push(button_up_packet(name, None));
+                            fwd.push(button_up_packet(name));
                         }
                     }
                 }

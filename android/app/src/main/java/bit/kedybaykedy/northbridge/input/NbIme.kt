@@ -7,10 +7,16 @@ import android.view.inputmethod.InputConnection
 
 class NbIme : InputMethodService() {
 
-    override fun onCreateInputView(): View {
-        return View(this).apply {
-            setBackgroundColor(-16777216)
-        }
+    override fun onCreateInputView(): View? {
+        return null
+    }
+
+    override fun onEvaluateFullscreenMode(): Boolean {
+        return false
+    }
+
+    override fun onEvaluateInputViewShown(): Boolean {
+        return false
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {

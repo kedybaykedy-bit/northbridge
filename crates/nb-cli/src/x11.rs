@@ -28,6 +28,8 @@ pub struct Injector {
     keysyms: Vec<u32>,
     xfixes: bool,
     hidden: bool,
+    last: std::cell::Cell<(i32, i32)>,
+    seeded: std::cell::Cell<bool>,
 }
 
 impl Injector {
@@ -60,6 +62,8 @@ impl Injector {
             keysyms,
             xfixes,
             hidden: false,
+            last: std::cell::Cell::new((0, 0)),
+            seeded: std::cell::Cell::new(false),
         })
     }
 
@@ -68,13 +72,21 @@ impl Injector {
     }
 
     pub fn pointer(&self) -> Result<(i32, i32)> {
+        if self.seeded.get() {
+            return Ok(self.last.get());
+        }
         let r = self.conn.query_pointer(self.root)?.reply().context("query pointer")?;
-        Ok((r.root_x as i32, r.root_y as i32))
+        let p = (r.root_x as i32, r.root_y as i32);
+        self.last.set(p);
+        self.seeded.set(true);
+        Ok(p)
     }
 
     pub fn warp(&self, x: i32, y: i32) -> Result<()> {
         let x = x.clamp(0, self.w - 1);
         let y = y.clamp(0, self.h - 1);
+        self.last.set((x, y));
+        self.seeded.set(true);
         self.conn
             .warp_pointer(x11rb::NONE, self.root, 0, 0, 0, 0, x as i16, y as i16)?
             .check()

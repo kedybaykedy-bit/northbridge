@@ -91,9 +91,12 @@ object NativePointer {
     const val BTN_MIDDLE = 274
     const val TMP_LIB = "/data/local/tmp/nbpointer_app.so"
     const val PRIV_LIB = "nbpointer.so"
-    private const val POINTER_SENSITIVITY = 1.0
+    private const val POINTER_SENSITIVITY = 0.65
+    private const val MIRROR_FREE_GAIN = 1.0
     private const val FLICK_LINEAR_PX = 64
     private const val FLICK_EXCESS_GAIN = 0.3
+    private const val PC_W = 1920.0
+    private const val PC_H = 1080.0
     private const val SHIZUKU_REQ = 4411
     private const val DAEMON_WAIT_MS = 8000L
 
@@ -114,6 +117,13 @@ object NativePointer {
     private var posY = 0.0
     private var accX = 0.0
     private var accY = 0.0
+    private var fx = 0.0
+    private var fy = 0.0
+    private var ex = 0
+    private var ey = 0
+    private var geomW = 0
+    private var geomH = 0
+    private var freeInit = false
 
     init {
         try {
@@ -237,6 +247,9 @@ object NativePointer {
             posInit = false
             accX = 0.0
             accY = 0.0
+            freeInit = false
+            geomW = 0
+            geomH = 0
             val old = backend
             backend = null
             old
@@ -249,73 +262,153 @@ object NativePointer {
         setStatus("IMLEC: SANAL")
     }
 
-    fun moveAbs(nx: Double, ny: Double, w: Int, h: Int) {
-        moveCalls++
+    fun letterbox(nx: Double, ny: Double, w: Int, h: Int): Pair<Double, Double> {
+        val aspect = PC_W / PC_H
+        val areaW: Double
+        val areaH: Double
+        val offX: Double
+        val offY: Double
+        if (w.toDouble() / h.toDouble() >= aspect) {
+            areaH = h.toDouble()
+            areaW = areaH * aspect
+            offX = (w.toDouble() - areaW) / 2.0
+            offY = 0.0
+        } else {
+            areaW = w.toDouble()
+            areaH = areaW / aspect
+            offX = 0.0
+            offY = h.toDouble() - areaH
+        }
+        return (offX + nx * areaW) to (offY + ny * areaH)
+    }
+
+    fun moveMirror(nx: Double, ny: Double, w: Int, h: Int) {
         val link = synchronized(lock) { backend }
         if (link == null) {
-            dropLog("move dropped (no backend)")
+            dropLog("mirror dropped (no backend)")
             return
         }
         if (w <= 0 || h <= 0) {
-            if (moveCalls <= 5) {
-                Log.w("northbridge", "pointer movebad w=" + w + " h=" + h)
-            }
             return
         }
         val cx = nx.coerceIn(0.0, 1.0)
         val cy = ny.coerceIn(0.0, 1.0)
+        synchronized(lock) {
+            if (backend == null) {
+                return
+            }
+            val t = letterbox(cx, cy, w, h)
+            fx = t.first
+            fy = t.second
+            geomW = w
+            geomH = h
+            freeInit = true
+        }
+        flush(link)
+    }
+
+    fun moveFree(dxPx: Double, dyPx: Double, w: Int, h: Int) {
+        if (dxPx == 0.0 && dyPx == 0.0) {
+            return
+        }
+        val link = synchronized(lock) { backend }
+        if (link == null) {
+            dropLog("free dropped (no backend)")
+            return
+        }
+        if (w <= 0 || h <= 0) {
+            return
+        }
+        synchronized(lock) {
+            if (backend == null) {
+                return
+            }
+            if (!freeInit) {
+                fx = w.toDouble() / 2.0
+                fy = h.toDouble() / 2.0
+                geomW = w
+                geomH = h
+                freeInit = true
+            } else if (w != geomW || h != geomH) {
+                if (geomW > 0 && geomH > 0) {
+                    fx = fx * w.toDouble() / geomW.toDouble()
+                    fy = fy * h.toDouble() / geomH.toDouble()
+                }
+                geomW = w
+                geomH = h
+            }
+            fx = (fx + dxPx * MIRROR_FREE_GAIN).coerceIn(0.0, w.toDouble())
+            fy = (fy + dyPx * MIRROR_FREE_GAIN).coerceIn(0.0, h.toDouble())
+        }
+        flush(link)
+    }
+
+    fun freePos(): Pair<Int, Int> {
+        synchronized(lock) {
+            return ex to ey
+        }
+    }
+
+    fun curNorm(): Pair<Double, Double> {
+        synchronized(lock) {
+            if (freeInit && geomW > 0 && geomH > 0) {
+                return (fx / geomW.toDouble()).coerceIn(0.0, 1.0) to (fy / geomH.toDouble()).coerceIn(0.0, 1.0)
+            }
+            return 0.5 to 0.5
+        }
+    }
+
+    private fun flush(link: DaemonLink) {
+        val dx: Int
+        val dy: Int
+        synchronized(lock) {
+            dx = fx.toInt() - ex
+            dy = fy.toInt() - ey
+            if (dx == 0 && dy == 0) {
+                return
+            }
+            ex += dx
+            ey += dy
+        }
+        if (!link.write("m " + dx + " " + dy)) {
+            drop(link)
+        }
+    }
+
+    private var moveLogCount = 0
+
+    fun moveRel(dxPx: Double, dyPx: Double, w: Int, h: Int) {
+        if (dxPx == 0.0 && dyPx == 0.0) {
+            return
+        }
+        if (w <= 0 || h <= 0) {
+            return
+        }
+        val link = synchronized(lock) { backend } ?: run {
+            dropLog("moverel dropped (no backend)")
+            return
+        }
         var dx = 0
         var dy = 0
         synchronized(lock) {
             if (backend == null) {
-                if (moveCalls <= 10) {
-                    Log.w("northbridge", "pointer move lost backend mid-call")
-                }
                 return
             }
-            if (!posInit) {
-                posX = cx
-                posY = cy
-                posInit = true
-                if (moveCalls <= 10) {
-                    Log.d("northbridge", "pointer anchor " + cx + "," + cy)
-                }
-                return
-            }
-            val s = minOf(w, h) * POINTER_SENSITIVITY
-            val rdx = cx - posX
-            val rdy = cy - posY
-            accX += rdx * s
-            accY += rdy * s
-            posX = cx
-            posY = cy
+            accX += dxPx * POINTER_SENSITIVITY
+            accY += dyPx * POINTER_SENSITIVITY
             dx = accX.toInt()
             dy = accY.toInt()
             accX -= dx
             accY -= dy
-            val rawPeak = maxOf(kotlin.math.abs(dx), kotlin.math.abs(dy))
             dx = compressDelta(dx)
             dy = compressDelta(dy)
             val bound = maxOf(w, h)
             dx = dx.coerceIn(-bound, bound)
             dy = dy.coerceIn(-bound, bound)
-            val peak = maxOf(kotlin.math.abs(dx), kotlin.math.abs(dy))
-            if (rawPeak > 120 && flickLogCount < 60) {
-                flickLogCount++
-                val ratio = if (rawPeak > 0) peak.toDouble() / rawPeak.toDouble() else 1.0
-                flickLine = "pointer flick r=" + rdx + "," + rdy + " s=" + s + " d=" + dx + "," + dy + " v=" + rawPeak + " g=" + ratio + " " + w + "x" + h
+            if (posInit) {
+                posX += dx.toDouble() / w
+                posY += dy.toDouble() / h
             }
-        }
-        if (moveCalls <= 3) {
-            Log.d("northbridge", "pointer in " + nx + "," + ny + " " + w + "x" + h + " dx=" + dx + " dy=" + dy)
-        }
-        val flick = synchronized(lock) {
-            val line = flickLine
-            flickLine = null
-            line
-        }
-        if (flick != null) {
-            Log.d("northbridge", flick)
         }
         if (dx != 0 || dy != 0) {
             moveLogCount++
@@ -325,15 +418,8 @@ object NativePointer {
             if (!link.write("m " + dx + " " + dy)) {
                 drop(link)
             }
-        } else if (moveCalls <= 5 || moveCalls % 200 == 0) {
-            Log.d("northbridge", "pointer zero acc=" + accX + "," + accY + " #" + moveCalls)
         }
     }
-
-    private var moveCalls = 0
-    private var moveLogCount = 0
-    private var flickLogCount = 0
-    private var flickLine: String? = null
 
     fun button(code: Int, down: Boolean) {
         val link = synchronized(lock) { backend } ?: return
@@ -521,6 +607,29 @@ object NativePointer {
             posInit = false
             accX = 0.0
             accY = 0.0
+            freeInit = false
+            geomW = 0
+            geomH = 0
+        }
+        val dm = try {
+            AppGraph.appContext.resources.displayMetrics
+        } catch (_: Exception) {
+            null
+        }
+        if (dm != null && dm.widthPixels > 0 && dm.heightPixels > 0) {
+            val cx = dm.widthPixels / 2
+            val cy = dm.heightPixels / 2
+            if (link.write("m " + cx + " " + cy)) {
+                synchronized(lock) {
+                    fx = cx.toDouble()
+                    fy = cy.toDouble()
+                    ex = cx
+                    ey = cy
+                    geomW = dm.widthPixels
+                    geomH = dm.heightPixels
+                    freeInit = true
+                }
+            }
         }
         setStatus(label)
     }
@@ -531,6 +640,7 @@ object NativePointer {
                 backend = null
                 held.clear()
                 posInit = false
+                freeInit = false
                 link
             } else {
                 null

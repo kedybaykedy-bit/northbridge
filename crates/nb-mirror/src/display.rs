@@ -5,6 +5,7 @@ use x11rb::connection::Connection;
 use x11rb::errors::{ConnectionError, ParseError, ReplyError, ReplyOrIdError};
 use x11rb::protocol::Event;
 use x11rb::protocol::xfixes::ConnectionExt as _;
+use x11rb::protocol::xinput::{ConnectionExt as _, EventMask as XIMask, XIEventMask};
 use x11rb::protocol::xproto::{
     AtomEnum, ConfigureWindowAux, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, GrabMode,
     GrabStatus, ImageFormat, InputFocus, PropMode, Window, WindowClass,
@@ -99,6 +100,48 @@ impl KvmGrab {
         if kstatus != GrabStatus::SUCCESS {
             grabbed.shutdown();
             anyhow::bail!("grab keyboard failed: status {}", u8::from(kstatus));
+        }
+        let xi_query = grabbed
+            .conn
+            .xinput_xi_query_version(2, 1)
+            .ok()
+            .and_then(|c| c.reply().ok());
+        if xi_query.is_some() {
+            let mut masks = vec![
+                XIMask { deviceid: 1, mask: vec![XIEventMask::RAW_MOTION] },
+                XIMask { deviceid: 2, mask: vec![XIEventMask::RAW_MOTION] },
+            ];
+            for id in 1u16..=16 {
+                if let Some(reply) = grabbed
+                    .conn
+                    .xinput_xi_query_device(id)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                {
+                    for info in reply.infos {
+                        if !masks.iter().any(|m| m.deviceid == info.deviceid) {
+                            masks.push(XIMask { deviceid: info.deviceid, mask: vec![XIEventMask::RAW_MOTION] });
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "[kvm] xi2 devices {:?}",
+                masks.iter().map(|m| m.deviceid).collect::<Vec<_>>()
+            );
+            let selected = grabbed
+                .conn
+                .xinput_xi_select_events(root, &masks)
+                .ok()
+                .and_then(|c| c.check().ok())
+                .is_some();
+            if selected {
+                eprintln!("[kvm] xi2 raw selected ok");
+            } else {
+                eprintln!("[kvm] xi2 raw select failed");
+            }
+        } else {
+            eprintln!("[kvm] xi2 query failed");
         }
         grabbed
             .conn

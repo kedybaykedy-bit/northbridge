@@ -47,6 +47,8 @@ class MirrorInjector {
     private var hoverBranchCount = 0
     private var enterBranchCount = 0
     private var sizeLogCount = 0
+    private var mirrorCount = 0
+    private var deltaCount = 0
 
     private var typePending = StringBuilder()
     private var typeFuture: java.util.concurrent.ScheduledFuture<*>? = null
@@ -85,6 +87,7 @@ class MirrorInjector {
             "leave" -> handleLeave()
             "button" -> handleButton(body)
             "move" -> handleMove(body)
+            "md" -> handleDelta(body)
             "hover" -> handleHover(body)
             "key" -> handleKey(body)
             "type" -> handleType(body)
@@ -96,7 +99,7 @@ class MirrorInjector {
     fun tap(nx: Double, ny: Double) {
         flushType()
         if (pointerUp()) {
-            pointerMoveTo(nx, ny)
+            mirrorWrite(nx, ny)
             NativePointer.button(NativePointer.BTN_LEFT, true)
             NativePointer.button(NativePointer.BTN_LEFT, false)
             return
@@ -138,7 +141,24 @@ class MirrorInjector {
             lastY = y.coerceIn(0.0, 1.0)
             return
         }
-        pointerMoveTo(x, y)
+    }
+
+    private fun handleDelta(body: JsonObject) {
+        val dx = (body["dx"] as? JsonPrimitive)?.doubleOrNull
+        val dy = (body["dy"] as? JsonPrimitive)?.doubleOrNull
+        if (dx == null || dy == null) {
+            return
+        }
+        deltaCount++
+        val info = dispInfo()
+        NativePointer.moveFree(dx, dy, info.first, info.second)
+        val pos = NativePointer.curNorm()
+        lastX = pos.first
+        lastY = pos.second
+        if (deltaCount <= 5 || deltaCount % 100 == 0) {
+            val p = NativePointer.freePos()
+            Log.d("northbridge", "kvm free px=" + p.first + " py=" + p.second + " #" + deltaCount)
+        }
     }
 
     private fun handleLeave() {
@@ -151,26 +171,27 @@ class MirrorInjector {
         return NativePointer.hasBackend()
     }
 
-    private fun pointerMoveTo(nx: Double, ny: Double) {
-        val cx = nx.coerceIn(0.0, 1.0)
-        val cy = ny.coerceIn(0.0, 1.0)
-        lastX = cx
-        lastY = cy
+    private fun mirrorWrite(nx: Double, ny: Double) {
         val info = dispInfo()
+        mirrorCount++
+        if (mirrorCount <= 3 || mirrorCount % 200 == 0) {
+            val p = NativePointer.letterbox(
+                nx.coerceIn(0.0, 1.0),
+                ny.coerceIn(0.0, 1.0),
+                info.first,
+                info.second,
+            )
+            Log.d("northbridge", "kvm abs x=" + nx + " y=" + ny + " px=" + p.first.toInt() + " py=" + p.second.toInt() + " #" + mirrorCount)
+        }
         sizeLogCount++
         if (sizeLogCount <= 5 || sizeLogCount % 200 == 0) {
             Log.d("northbridge", "kvm size stored=" + screenW + "x" + screenH + " live=" + info.first + "x" + info.second + " ori=" + info.third + " #" + sizeLogCount)
         }
-        NativePointer.moveAbs(cx, cy, info.first, info.second)
+        NativePointer.moveMirror(nx, ny, info.first, info.second)
     }
 
     private fun handleTap(body: JsonObject) {
         if (pointerUp()) {
-            val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
-            val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
-            if (x != null && y != null) {
-                pointerMoveTo(x, y)
-            }
             NativePointer.button(NativePointer.BTN_LEFT, true)
             NativePointer.button(NativePointer.BTN_LEFT, false)
             return
@@ -199,6 +220,10 @@ class MirrorInjector {
                 if (x != null && y != null) {
                     lastX = x
                     lastY = y
+                } else {
+                    val pos = NativePointer.curNorm()
+                    lastX = pos.first
+                    lastY = pos.second
                 }
                 longPressAt(lastX, lastY)
             }
@@ -214,6 +239,10 @@ class MirrorInjector {
             if (x != null && y != null) {
                 lastX = x
                 lastY = y
+            } else {
+                val pos = NativePointer.curNorm()
+                lastX = pos.first
+                lastY = pos.second
             }
             armDrag(lastX, lastY)
             return
@@ -239,11 +268,6 @@ class MirrorInjector {
         if (code == null) {
             return
         }
-        val x = (body["x"] as? JsonPrimitive)?.doubleOrNull
-        val y = (body["y"] as? JsonPrimitive)?.doubleOrNull
-        if (x != null && y != null) {
-            pointerMoveTo(x, y)
-        }
         NativePointer.button(code, down)
     }
 
@@ -263,7 +287,7 @@ class MirrorInjector {
             lastY = y.coerceIn(0.0, 1.0)
             return
         }
-        pointerMoveTo(x, y)
+        mirrorWrite(x, y)
     }
 
     private fun handleMove(body: JsonObject) {
@@ -278,7 +302,7 @@ class MirrorInjector {
             return
         }
         if (up) {
-            pointerMoveTo(x, y)
+            mirrorWrite(x, y)
             return
         }
         if (!dragArmed) return

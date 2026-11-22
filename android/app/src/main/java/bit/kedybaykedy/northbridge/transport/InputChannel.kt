@@ -4,6 +4,7 @@ import android.os.Looper
 import android.util.Log
 import bit.kedybaykedy.northbridge.AppGraph
 import bit.kedybaykedy.northbridge.data.TrustedDevice
+import bit.kedybaykedy.northbridge.input.NativePointer
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
@@ -91,6 +92,7 @@ class InputChannel(
     private var lastActivityAt = 0L
     private var kvmRecvCount = 0
     private var rxCount = 0
+    private var relLoopCount = 0
 
     fun attach(target: TrustedDevice?) {
         if (target != null && target == attached && connectionJob?.isActive == true) {
@@ -118,6 +120,20 @@ class InputChannel(
 
     fun send(msg: InputMsg) {
         if (attached == null) return
+        if (msg is InputMsg.RelMove && NativePointer.hasBackend()) {
+            relLoopCount++
+            if (relLoopCount <= 5 || relLoopCount % 60 == 0) {
+                Log.d("northbridge", "kvm local-rel dx=" + msg.dx + " dy=" + msg.dy + " #" + relLoopCount)
+            }
+            val dm = try {
+                AppGraph.appContext.resources.displayMetrics
+            } catch (_: Exception) {
+                null
+            }
+            if (dm != null) {
+                NativePointer.moveRel(msg.dx, msg.dy, dm.widthPixels, dm.heightPixels)
+            }
+        }
         outbox.trySend(msg)
     }
 
@@ -324,10 +340,12 @@ class InputChannel(
             }
             when (packet.kind) {
                 KIND_KVM -> {
-                    val msg = decodeBody(packet.body) ?: continue
-                    when (msg) {
-                        is InputMsg.Enter, is InputMsg.Move, InputMsg.Leave -> _messages.emit(msg)
-                        else -> Unit
+                    val msg = decodeBody(packet.body)
+                    if (msg != null) {
+                        when (msg) {
+                            is InputMsg.Enter, is InputMsg.Move, InputMsg.Leave -> _messages.emit(msg)
+                            else -> Unit
+                        }
                     }
                     val body = packet.body as? JsonObject ?: continue
                     val t = (body["t"] as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -422,7 +440,7 @@ class InputChannel(
         const val HTTP_PORT = 53317
         const val KIND_KVM = "nb.kvm"
         const val KIND_ERROR = "nb.error"
-        private val KVM_BODY_TYPES = setOf("enter", "leave", "move", "button", "scroll", "key", "type")
+        private val KVM_BODY_TYPES = setOf("enter", "leave", "move", "md", "button", "scroll", "key", "type")
     }
 }
 

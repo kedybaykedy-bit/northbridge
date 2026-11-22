@@ -79,19 +79,20 @@ pub fn move_packet(x: f64, y: f64) -> serde_json::Value {
     serde_json::json!({"t": "move", "b": "left", "x": x, "y": y})
 }
 
+pub fn move_delta_packet(dx: f64, dy: f64) -> serde_json::Value {
+    serde_json::json!({"t": "md", "dx": dx, "dy": dy})
+}
+
 pub fn hover_packet(x: f64, y: f64) -> serde_json::Value {
     serde_json::json!({"t": "hover", "x": x, "y": y})
 }
 
-pub fn button_down_packet(name: &str, x: f64, y: f64) -> serde_json::Value {
-    serde_json::json!({"t": "button", "b": name, "down": true, "x": x, "y": y})
+pub fn button_down_packet(name: &str) -> serde_json::Value {
+    serde_json::json!({"t": "button", "b": name, "down": true})
 }
 
-pub fn button_up_packet(name: &str, coords: Option<(f64, f64)>) -> serde_json::Value {
-    match coords {
-        Some((x, y)) => serde_json::json!({"t": "button", "b": name, "down": false, "x": x, "y": y}),
-        None => serde_json::json!({"t": "button", "b": name, "down": false}),
-    }
+pub fn button_up_packet(name: &str) -> serde_json::Value {
+    serde_json::json!({"t": "button", "b": name, "down": false})
 }
 
 pub fn button_cancel_packet(name: &str) -> serde_json::Value {
@@ -374,17 +375,14 @@ mod tests {
         assert_eq!(pkt["b"], "left");
         assert_eq!(pkt["x"], 0.25);
         assert_eq!(pkt["y"], 0.75);
-        let pkt = button_down_packet("left", 0.5, 0.5);
+        let pkt = button_down_packet("left");
         assert_eq!(pkt["t"], "button");
         assert_eq!(pkt["down"], true);
-        assert_eq!(pkt["x"], 0.5);
-        let pkt = button_up_packet("left", Some((0.6, 0.4)));
-        assert_eq!(pkt["down"], false);
-        assert_eq!(pkt["x"], 0.6);
-        assert_eq!(pkt["y"], 0.4);
-        let pkt = button_up_packet("right", None);
+        assert!(pkt.get("x").is_none());
+        let pkt = button_up_packet("left");
         assert_eq!(pkt["down"], false);
         assert!(pkt.get("x").is_none());
+        assert!(pkt.get("y").is_none());
         assert!(pkt.get("cancel").is_none());
         let pkt = button_cancel_packet("left");
         assert_eq!(pkt["down"], false);
